@@ -196,15 +196,15 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
 
 ## Modal Setup
 
-Modal provides serverless GPU inference with pay-per-second billing. A free hosted MSA server eliminates the need to download databases.
+Modal provides serverless GPU inference with pay-per-second billing.
 
 ```bash
 pip install modal && modal token new
 modal run modal/upload_weights.py --file /path/to/af3.bin.zst --no-extract
+modal run modal/prepare_databases.py --from-prebuilt   # ~1 hour, downloads pre-built DBs from HuggingFace
 
-# Run predictions using the free MSA server
-modal run modal/af3_predict.py --input protein.json \
-    --msa-server https://romero-lab--alphafold3-msa-server-msa.modal.run
+# Run predictions
+modal run modal/af3_predict.py --input protein.json
 ```
 
 See [docs/modal.md](docs/modal.md) for the full CLI reference, batch processing, multi-GPU modes, and cost estimates.

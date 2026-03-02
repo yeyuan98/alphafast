@@ -25,11 +25,8 @@ Usage:
     # Custom GPUs
     modal run modal/af3_predict.py --input-dir ./proteins/ --gpu h100 --producer-gpu l40s --mode producer-consumer
 
-    # Using remote MSA server
-    modal run modal/af3_predict.py --input-dir ./proteins/ --msa-server https://your-app.modal.run/msa
-
 Prerequisites:
-    1. Databases prepared: modal run modal/prepare_databases.py
+    1. Databases prepared: modal run modal/prepare_databases.py --from-prebuilt
     2. Weights uploaded: modal run modal/upload_weights.py --file weights.tar.zst
 """
 
@@ -295,59 +292,6 @@ def collect_chunk_results(
             })
 
     return results
-
-
-def _call_msa_server(inputs: list[dict], server_url: str, batch_size: int = 32) -> dict:
-    """Call a remote MSA server via HTTP, batching inputs to avoid timeouts.
-
-    Args:
-        inputs: List of AF3 input JSON dicts.
-        server_url: URL of the MSA server endpoint.
-        batch_size: Batch size for MSA processing.
-
-    Returns:
-        Dict mapping protein names to enriched JSON strings.
-    """
-    import urllib.request
-    import urllib.error
-
-    all_data = {}
-
-    # Send in chunks to avoid server timeout / OOM on large batches
-    chunk_size = batch_size
-    for chunk_start in range(0, len(inputs), chunk_size):
-        chunk = inputs[chunk_start:chunk_start + chunk_size]
-        chunk_end = min(chunk_start + chunk_size, len(inputs))
-        print(f"  MSA server: sending batch {chunk_start + 1}-{chunk_end}/{len(inputs)}")
-
-        payload = json.dumps({
-            "inputs": chunk,
-            "batch_size": batch_size,
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            server_url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=3600 * 24) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError) as e:
-            print(f"  MSA server error for batch {chunk_start + 1}-{chunk_end}: {e}")
-            continue
-
-        if result.get("status") == "error":
-            print(f"  MSA server returned error: {result.get('error', 'Unknown')}")
-            continue
-
-        chunk_data = result.get("data", {})
-        print(f"  MSA server: got {len(chunk_data)} results")
-        all_data.update(chunk_data)
-
-    return all_data
 
 
 # ── Modal remote functions ────────────────────────────────────────────
@@ -680,7 +624,6 @@ def run_producer(
     job_id: str,
     batch_size: int = 32,
     protein_names: list[str] | None = None,
-    msa_server_url: str | None = None,
 ) -> dict:
     """Run batch MSA/data pipeline on producer GPU.
 
@@ -726,80 +669,55 @@ def run_producer(
         effective_input_dir = input_dir
 
     try:
-        if msa_server_url:
-            # Remote MSA via HTTP
-            inputs_data = []
-            input_sources = []
-            for src in input_jsons:
-                with open(src) as f:
-                    inputs_data.append(json.load(f))
-                input_sources.append(src)
-            enriched = _call_msa_server(inputs_data, msa_server_url, batch_size)
-            data_json_names = []
-            failures = []
-            for inp, inp_src in zip(inputs_data, input_sources):
-                name = inp.get("name", Path(inp_src).stem)
-                if name in enriched:
-                    dest_dir = msa_output_dir / name
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    dest_file = dest_dir / f"{name}_data.json"
-                    if isinstance(enriched[name], str):
-                        dest_file.write_text(enriched[name])
-                    else:
-                        dest_file.write_text(json.dumps(enriched[name]))
-                    data_json_names.append(name)
-                else:
-                    failures.append(name)
-        else:
-            cmd = [
-                "python", "run_data_pipeline.py",
-                f"--input_dir={effective_input_dir}",
-                f"--output_dir={dp_output}",
-                f"--db_dir={DATABASE_MOUNT_PATH}",
-                f"--mmseqs_db_dir={MMSEQS_DB_PATH}",
-                f"--batch_size={batch_size}",
-                "--use_mmseqs_gpu",
-            ]
-            print(f"Command: {' '.join(cmd)}")
+        cmd = [
+            "python", "run_data_pipeline.py",
+            f"--input_dir={effective_input_dir}",
+            f"--output_dir={dp_output}",
+            f"--db_dir={DATABASE_MOUNT_PATH}",
+            f"--mmseqs_db_dir={MMSEQS_DB_PATH}",
+            f"--batch_size={batch_size}",
+            "--use_mmseqs_gpu",
+        ]
+        print(f"Command: {' '.join(cmd)}")
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, cwd="/app/alphafold",
-            )
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd="/app/alphafold",
+        )
 
-            save_subprocess_log(
-                log_dir=str(msa_output_dir), name="producer",
-                stage="msa", cmd=cmd, returncode=result.returncode,
-                stdout=result.stdout, stderr=result.stderr,
-            )
+        save_subprocess_log(
+            log_dir=str(msa_output_dir), name="producer",
+            stage="msa", cmd=cmd, returncode=result.returncode,
+            stdout=result.stdout, stderr=result.stderr,
+        )
 
-            if result.returncode != 0:
-                print(f"Producer stderr: {result.stderr[-2000:]}")
-                return {
-                    "status": "error",
-                    "error": f"Data pipeline failed: {result.stderr[-2000:]}",
-                    "data_json_names": [],
-                    "timing": {"total_seconds": round(time.time() - start, 2)},
-                    "failures": [],
-                }
+        if result.returncode != 0:
+            print(f"Producer stderr: {result.stderr[-2000:]}")
+            return {
+                "status": "error",
+                "error": f"Data pipeline failed: {result.stderr[-2000:]}",
+                "data_json_names": [],
+                "timing": {"total_seconds": round(time.time() - start, 2)},
+                "failures": [],
+            }
 
-            data_json_files = list(dp_output.rglob("*_data.json"))
-            data_json_names = []
-            failures = []
+        data_json_files = list(dp_output.rglob("*_data.json"))
+        data_json_names = []
+        failures = []
 
-            for djf in data_json_files:
-                protein_name = djf.parent.name if djf.parent != dp_output else djf.stem.replace("_data", "")
-                dest_dir = msa_output_dir / protein_name
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(djf, dest_dir / djf.name)
-                data_json_names.append(protein_name)
+        for djf in data_json_files:
+            protein_name = djf.parent.name if djf.parent != dp_output else djf.stem.replace("_data", "")
+            dest_dir = msa_output_dir / protein_name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(djf, dest_dir / djf.name)
+            data_json_names.append(protein_name)
 
-            input_names = {p.stem for p in input_jsons}
-            produced_names = set(data_json_names)
-            for missing in input_names - produced_names:
-                failures.append(missing)
+        input_names = {p.stem for p in input_jsons}
+        produced_names = set(data_json_names)
+        for missing in input_names - produced_names:
+            failures.append(missing)
 
         # HOT PATH: Write to Dict + signal Queue
-        written = write_batch_to_dict(data_json_names, str(dp_output if not msa_server_url else msa_output_dir), data_dict)
+        written = write_batch_to_dict(data_json_names, str(dp_output), data_dict)
         data_queue.put(written)
 
         # COLD PATH: Copy to volume for persistence
@@ -1212,7 +1130,6 @@ def _run_multi_gpu_pipeline(
     num_gpus: int,
     batch_size: int,
     skip_msa: bool,
-    msa_server_url: str | None,
 ):
     """Run batch prediction split across multiple GPUs.
 
@@ -1225,38 +1142,11 @@ def _run_multi_gpu_pipeline(
     print(f"Num GPUs: {num_gpus}")
     print(f"Batch size (MMseqs2): {batch_size}")
     print(f"Skip MSA: {skip_msa}")
-    if msa_server_url:
-        print(f"MSA server: {msa_server_url}")
     print()
 
     total_start = time.time()
 
-    # If using remote MSA server, pre-compute MSA for all inputs first,
-    # then distribute enriched inputs across GPUs with skip_msa=True.
-    run_msa_locally = not skip_msa and not msa_server_url
-    if msa_server_url and not skip_msa:
-        print(f"Calling MSA server for {len(inputs)} inputs (batch_size={batch_size})...")
-        msa_start = time.time()
-        enriched = _call_msa_server(inputs, msa_server_url, batch_size=batch_size)
-        msa_elapsed = time.time() - msa_start
-        print(f"MSA server returned {len(enriched)}/{len(inputs)} results ({msa_elapsed:.1f}s)")
-
-        enriched_inputs = []
-        missing = []
-        for inp in inputs:
-            name = inp.get("name", "unknown")
-            if name in enriched:
-                data = enriched[name]
-                enriched_inputs.append(json.loads(data) if isinstance(data, str) else data)
-            else:
-                missing.append(name)
-        if missing:
-            print(f"  WARNING: MSA server missing {len(missing)} proteins: {missing[:10]}")
-        inputs = enriched_inputs
-        run_msa_locally = False
-        if not inputs:
-            print("Error: MSA server returned no results")
-            return
+    run_msa_locally = not skip_msa
 
     chunks = split_into_chunks(inputs, num_gpus)
     non_empty_chunks = [c for c in chunks if c]
@@ -1316,7 +1206,6 @@ def _run_producer_consumer_pipeline(
     num_consumers: int,
     skip_msa: bool,
     keep_workspace: bool,
-    msa_server_url: str | None,
 ):
     """Run the warm producer-consumer pipeline."""
     from utils.batch_utils import (
@@ -1332,8 +1221,6 @@ def _run_producer_consumer_pipeline(
     print(f"Batch size: {batch_size}")
     print(f"Num consumers: {num_consumers}")
     print(f"Skip MSA: {skip_msa}")
-    if msa_server_url:
-        print(f"MSA server: {msa_server_url}")
     print()
 
     estimate = estimate_warm_producer_consumer_cost(
@@ -1384,7 +1271,6 @@ def _run_producer_consumer_pipeline(
 
             producer_result = run_producer.remote(
                 job_id, batch_size, protein_names=batch_names,
-                msa_server_url=msa_server_url,
             )
             producer_seconds += producer_result["timing"]["total_seconds"]
 
@@ -1506,7 +1392,6 @@ def main(
     num_consumers: int = NUM_CONSUMERS,
     num_gpus: int | None = None,
     keep_workspace: bool = False,
-    msa_server: str | None = None,
 ):
     """
     Run AlphaFold3 structure predictions on Modal.
@@ -1527,7 +1412,6 @@ def main(
         num_consumers: Number of warm consumer containers (P-C mode)
         num_gpus: Number of GPUs for multi-gpu mode (splits inputs across GPUs)
         keep_workspace: Don't clean up workspace volume after P-C completion
-        msa_server: URL of remote MSA server (skip local DB for MSA)
     """
     print()
     print("=" * 60)
@@ -1588,8 +1472,6 @@ def main(
     print(f"GPU: {_CONSUMER_GPU}")
     print(f"MSA: {'Skip' if skip_msa else 'Run'}")
     print(f"Batch size (MMseqs2): {batch_size}")
-    if msa_server:
-        print(f"MSA server: {msa_server}")
 
     # Dispatch to appropriate mode
     if mode == "multi-gpu":
@@ -1602,7 +1484,6 @@ def main(
             num_gpus=effective_gpus,
             batch_size=batch_size,
             skip_msa=skip_msa,
-            msa_server_url=msa_server,
         )
     elif mode == "producer-consumer":
         print(f"Mode: Producer-Consumer (warm pipeline)")
@@ -1614,7 +1495,6 @@ def main(
             num_consumers=num_consumers,
             skip_msa=skip_msa,
             keep_workspace=keep_workspace,
-            msa_server_url=msa_server,
         )
     else:
         # Single mode (default)
@@ -1624,43 +1504,7 @@ def main(
             print("Mode: MSA only (no inference)")
         print()
 
-        # If --msa-server is provided, call the remote MSA server first,
-        # then run inference with pre-computed MSA data (skip local pipeline).
-        run_msa_locally = not skip_msa and not msa_server
-        if msa_server and not skip_msa and not msa_only:
-            print(f"Calling MSA server for {len(inputs)} inputs (batch_size={batch_size})...")
-            input_names = [inp.get("name", "unknown") for inp in inputs]
-            print(f"  Input names (first 5): {input_names[:5]}")
-            msa_start = time.time()
-            enriched = _call_msa_server(inputs, msa_server, batch_size=batch_size)
-            msa_elapsed = time.time() - msa_start
-            print(f"MSA server returned {len(enriched)}/{len(inputs)} results ({msa_elapsed:.1f}s)")
-            if enriched:
-                returned_names = list(enriched.keys())
-                print(f"  Returned names (first 5): {returned_names[:5]}")
-            print()
-
-            # Replace inputs with enriched data from MSA server
-            enriched_inputs = []
-            missing = []
-            for inp in inputs:
-                name = inp.get("name", "unknown")
-                if name in enriched:
-                    data = enriched[name]
-                    if isinstance(data, str):
-                        enriched_inputs.append(json.loads(data))
-                    else:
-                        enriched_inputs.append(data)
-                else:
-                    missing.append(name)
-            if missing:
-                print(f"  WARNING: MSA server missing {len(missing)} proteins")
-                print(f"  First 10 missing: {missing[:10]}")
-            inputs = enriched_inputs
-
-            if not inputs:
-                print("Error: MSA server returned no results")
-                return
+        run_msa_locally = not skip_msa
 
         if len(inputs) == 1:
             print(f"Running prediction for: {inputs[0].get('name', 'protein')}")

@@ -47,6 +47,9 @@ WARM_CONSUMER_TIMEOUT = 3600 * 6  # 6 hours (one container processes many protei
 DATABASE_SETUP_TIMEOUT = 3600 * 24  # 24 hours
 WEIGHTS_UPLOAD_TIMEOUT = 1800  # 30 minutes
 
+# HuggingFace pre-built database repository
+HF_PREBUILT_REPO = "RomeroLab-Duke/af3-mmseqs-db"
+
 # Database source URL
 DATABASE_SOURCE_URL = "https://storage.googleapis.com/alphafold-databases/v3.0"
 

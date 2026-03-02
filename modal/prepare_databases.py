@@ -24,6 +24,8 @@ Usage:
 import modal
 from pathlib import Path
 
+from config import HF_PREBUILT_REPO
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -87,6 +89,167 @@ mmseqs_image = (
         "rm -rf mmseqs mmseqs.tar.gz",
     )
 )
+
+# Image with huggingface_hub for pre-built DB download
+hf_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("tar", "zstd")
+    .pip_install("huggingface_hub")
+)
+
+
+# =============================================================================
+# DOWNLOAD PRE-BUILT DATABASES FROM HUGGINGFACE
+# =============================================================================
+
+@app.function(
+    image=hf_image,
+    volumes={DATABASE_MOUNT_PATH: db_volume},
+    timeout=3600 * 24,  # 24 hours
+    cpu=4,
+    memory=16384,  # 16GB RAM
+)
+def download_from_hf():
+    """
+    Download pre-built AlphaFold3 databases from HuggingFace Hub.
+
+    Downloads all files from the HF repo directly to the Modal volume,
+    skipping files that already exist. Automatically extracts mmcif tar
+    archives after download.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+    import subprocess
+    import shutil
+
+    db_path = Path(DATABASE_MOUNT_PATH)
+    db_path.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print("Downloading Pre-built Databases from HuggingFace")
+    print("=" * 60)
+    print(f"Repository: {HF_PREBUILT_REPO}")
+    print(f"Target: {db_path}")
+    print("=" * 60)
+    print()
+
+    api = HfApi()
+    repo_files = api.list_repo_files(HF_PREBUILT_REPO, repo_type="dataset")
+    print(f"Found {len(repo_files)} files in repository")
+    print()
+
+    # Separate regular files from .part* split files
+    part_files = sorted(f for f in repo_files if ".part" in f)
+    regular_files = sorted(f for f in repo_files if ".part" not in f)
+
+    # Download regular files first
+    for repo_file in regular_files:
+        local_path = db_path / repo_file
+
+        # Skip files that already exist
+        if local_path.exists() and local_path.stat().st_size > 0:
+            print(f"  SKIP: {repo_file} (exists)")
+            continue
+
+        # For mmcif tar files, check if already extracted
+        if "mmcif" in repo_file and repo_file.endswith((".tar", ".tar.zst")):
+            mmcif_dir = db_path / "mmcif_files"
+            if mmcif_dir.exists() and any(mmcif_dir.iterdir()):
+                print(f"  SKIP: {repo_file} (mmcif_files/ already extracted)")
+                continue
+
+        print(f"  Downloading: {repo_file}...")
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        hf_hub_download(
+            repo_id=HF_PREBUILT_REPO,
+            filename=repo_file,
+            repo_type="dataset",
+            local_dir=str(db_path),
+        )
+        print(f"  DONE: {repo_file}")
+        db_volume.commit()
+
+    # Download and reassemble split .part* files
+    # Group parts by their base name (e.g. mmseqs/mgnify_padded.part00 → mmseqs/mgnify_padded)
+    if part_files:
+        from collections import defaultdict
+        part_groups = defaultdict(list)
+        for pf in part_files:
+            # Strip .partNN suffix to get base name
+            base = pf.rsplit(".part", 1)[0]
+            part_groups[base].append(pf)
+
+        for base_name, parts in sorted(part_groups.items()):
+            reassembled_path = db_path / base_name
+
+            # Skip if already reassembled
+            if reassembled_path.exists() and reassembled_path.stat().st_size > 0:
+                print(f"  SKIP: {base_name} (already reassembled)")
+                continue
+
+            # For mmcif tar, check if already extracted
+            if "mmcif" in base_name and base_name.endswith((".tar", ".tar.zst")):
+                mmcif_dir = db_path / "mmcif_files"
+                if mmcif_dir.exists() and any(mmcif_dir.iterdir()):
+                    print(f"  SKIP: {base_name} (mmcif_files/ already extracted)")
+                    continue
+
+            # Download all parts
+            print(f"  Downloading {len(parts)} parts for {base_name}...")
+            part_paths = []
+            for part_file in sorted(parts):
+                print(f"    Downloading: {part_file}...")
+                hf_hub_download(
+                    repo_id=HF_PREBUILT_REPO,
+                    filename=part_file,
+                    repo_type="dataset",
+                    local_dir=str(db_path),
+                )
+                part_paths.append(db_path / part_file)
+                print(f"    DONE: {part_file}")
+
+            # Reassemble: cat parts > original
+            reassembled_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"  Reassembling {base_name} from {len(part_paths)} parts...")
+            cat_cmd = ["cat"] + [str(p) for p in sorted(part_paths)]
+            with open(reassembled_path, "wb") as out_f:
+                result = subprocess.run(cat_cmd, stdout=out_f)
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to reassemble {base_name}")
+
+            size_gb = reassembled_path.stat().st_size / (1024**3)
+            print(f"  Reassembled: {base_name} ({size_gb:.1f} GB)")
+
+            # Clean up parts
+            for p in part_paths:
+                p.unlink()
+            print(f"  Cleaned up {len(part_paths)} part files")
+            db_volume.commit()
+
+    # Auto-extract mmcif tar archives
+    for tar_name in ["mmcif_files.tar.zst", "mmcif_files.tar"]:
+        tar_path = db_path / tar_name
+        if not tar_path.exists():
+            continue
+        mmcif_dir = db_path / "mmcif_files"
+        if mmcif_dir.exists() and any(mmcif_dir.iterdir()):
+            continue
+        print(f"  Extracting {tar_name}...")
+        if tar_name.endswith(".tar.zst"):
+            cmd = ["tar", "--use-compress-program=zstd", "-xf", str(tar_path), "-C", str(db_path)]
+        else:
+            cmd = ["tar", "-xf", str(tar_path), "-C", str(db_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  ERROR extracting: {result.stderr}")
+        else:
+            print(f"  Extracted to {db_path}/mmcif_files/")
+            tar_path.unlink()
+            db_volume.commit()
+
+    print()
+    print("=" * 60)
+    print("Pre-built Database Download Complete!")
+    print("=" * 60)
 
 
 # =============================================================================
@@ -569,15 +732,18 @@ def check_status():
 def main(
     status: bool = False,
     convert_only: bool = False,
+    from_prebuilt: bool = False,
 ):
     """
     Prepare AlphaFold3 databases on Modal.
 
-    Downloads from Google Cloud Storage and converts to MMseqs2 format.
+    Downloads from Google Cloud Storage and converts to MMseqs2 format,
+    or downloads pre-built databases from HuggingFace Hub.
 
     Args:
         status: Check current database status
         convert_only: Only run MMseqs2 conversion (databases must exist)
+        from_prebuilt: Download pre-built databases from HuggingFace (~1 hour)
     """
     print()
     print("=" * 60)
@@ -586,6 +752,17 @@ def main(
     print()
 
     if status:
+        check_status.remote()
+        return
+
+    if from_prebuilt:
+        print("Mode: Download pre-built databases from HuggingFace")
+        print(f"Repository: {HF_PREBUILT_REPO}")
+        print()
+        print("This will download pre-built MMseqs2 GPU databases directly")
+        print("to your Modal volume. No conversion step needed.")
+        print()
+        download_from_hf.remote()
         check_status.remote()
         return
 

@@ -53,7 +53,7 @@ MMSEQS_THREADS="${7:-}"
 export DB_DIR="${DB_DIR:-/data/public_databases}"
 export MMSEQS_DB_DIR="${MMSEQS_DB_DIR:-/data/mmseqs_databases}"
 export MODEL_DIR="${MODEL_DIR:-/data/models}"
-export LOG_DIR="${LOG_DIR:-logs}"
+export LOG_DIR="${LOG_DIR:-${AF_OUTPUT_DIR}/logs}"
 RUN_DATA_PIPELINE_PATH="${RUN_DATA_PIPELINE_PATH:-/app/alphafold/run_data_pipeline.py}"
 RUN_ALPHAFOLD_PATH="${RUN_ALPHAFOLD_PATH:-/app/alphafold/run_alphafold.py}"
 
@@ -116,6 +116,13 @@ START_TIME=$(date +%s)
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_LIST"
 
+# Cap GPU count when there are fewer inputs than GPUs
+if [ "$TOTAL_INPUTS" -lt "$NUM_GPUS" ]; then
+  echo "NOTE: Only ${TOTAL_INPUTS} inputs for ${NUM_GPUS} GPUs — using ${TOTAL_INPUTS} GPUs"
+  NUM_GPUS="$TOTAL_INPUTS"
+  GPU_ARRAY=("${GPU_ARRAY[@]:0:$NUM_GPUS}")
+fi
+
 # Create per-GPU partition directories with symlinks (round-robin)
 for ((i=0; i<NUM_GPUS; i++)); do
   mkdir -p "${MSA_OUTPUT_DIR}/partition_${i}"
@@ -130,7 +137,7 @@ done
 
 # Report partition sizes
 for ((i=0; i<NUM_GPUS; i++)); do
-  PART_COUNT=$(ls "${INPUT_DIR}/.partition_${i}"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  PART_COUNT=$(find "${INPUT_DIR}/.partition_${i}" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d ' ')
   echo "  GPU ${GPU_ARRAY[$i]}: ${PART_COUNT} inputs"
 done
 
@@ -150,7 +157,7 @@ for ((i=0; i<NUM_GPUS; i++)); do
   MSA_OUT="${MSA_OUTPUT_DIR}/partition_${i}"
   MSA_LOG="${LOG_DIR}/msa_gpu${GPU_IDX}_${TIMESTAMP}.log"
 
-  PART_COUNT=$(ls "${PARTITION_DIR}"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  PART_COUNT=$(find "${PARTITION_DIR}" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d ' ')
   GPU_BATCH_SIZE="${BATCH_SIZE:-512}"
 
   echo "  Starting MSA on GPU ${GPU_IDX} (${PART_COUNT} inputs, batch_size=${GPU_BATCH_SIZE})"
@@ -243,7 +250,7 @@ done
 
 # Report fold partition sizes
 for ((i=0; i<NUM_GPUS; i++)); do
-  FOLD_COUNT=$(ls "${MSA_OUTPUT_DIR}/.fold_partition_${i}"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  FOLD_COUNT=$(find "${MSA_OUTPUT_DIR}/.fold_partition_${i}" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d ' ')
   echo "  GPU ${GPU_ARRAY[$i]}: ${FOLD_COUNT} proteins"
 done
 
@@ -265,6 +272,7 @@ for ((i=0; i<NUM_GPUS; i++)); do
     python "$RUN_ALPHAFOLD_PATH" \
     --input_dir="$FOLD_PARTITION" \
     --norun_data_pipeline \
+    --model_dir="$MODEL_DIR" \
     --output_dir="$AF_OUTPUT_DIR" \
     --gpu_device=0 \
     --force_output_dir \

@@ -24,6 +24,7 @@ from typing import NamedTuple
 
 from absl import logging
 from alphafold3.data.tools import mmseqs
+from alphafold3.data.tools.mmseqs import convert_aligned_fasta_to_a3m
 from alphafold3.data.tools import msa_tool
 from alphafold3.data.tools import subprocess_utils
 
@@ -293,7 +294,7 @@ class MmseqsBatch:
         result_db: str,
         msa_db: str,
     ) -> None:
-        """Converts search results to MSA in A3M format."""
+        """Converts search results to MSA in aligned FASTA format."""
         cmd = [
             self._binary_path,
             "result2msa",
@@ -302,7 +303,7 @@ class MmseqsBatch:
             result_db,
             msa_db,
             "--msa-format-mode",
-            "5",  # A3M format
+            "2",  # Aligned FASTA (preserves full UniProt headers for MSA pairing)
             # No --threads limit to allow full CPU utilization
         ]
         subprocess_utils.run(
@@ -376,7 +377,7 @@ class MmseqsBatch:
 
             a3m_file = output_dir / str(idx)
             if a3m_file.exists():
-                a3m_content = a3m_file.read_text()
+                a3m_content = convert_aligned_fasta_to_a3m(a3m_file.read_text())
             else:
                 # No hits found
                 logging.warning(
@@ -728,7 +729,7 @@ class MmseqsMultiDBBatch:
                 result_db,
                 str(msa_db),
                 "--msa-format-mode",
-                "5",
+                "2",  # Aligned FASTA (preserves full UniProt headers)
             ]
             subprocess_utils.run(
                 cmd=cmd,
@@ -814,7 +815,7 @@ class MmseqsMultiDBBatch:
 
             a3m_file = output_dir / str(idx)
             if a3m_file.exists():
-                a3m_content = a3m_file.read_text()
+                a3m_content = convert_aligned_fasta_to_a3m(a3m_file.read_text())
             else:
                 a3m_content = f">{seq_id}\n{sequences[seq_id]}\n"
 

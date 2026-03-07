@@ -23,6 +23,40 @@ from alphafold3.data.tools import msa_tool
 from alphafold3.data.tools import subprocess_utils
 
 
+def convert_aligned_fasta_to_a3m(aligned_fasta: str) -> str:
+    """Converts aligned FASTA (from result2msa mode 2) to A3M format.
+
+    Mode 2 preserves full database headers but outputs aligned FASTA with
+    explicit gap columns. This converts to A3M (lowercase insertions, no
+    gap-only columns) while preserving the full UniProt headers needed for
+    species extraction and MSA pairing.
+
+    Uses the same conversion logic as parsers.convert_stockholm_to_a3m()
+    (parsers.py:158-162) but with FASTA input instead of Stockholm.
+    """
+    from alphafold3.cpp import msa_conversion
+    from alphafold3.data import parsers
+
+    sequences, descriptions = parsers.parse_fasta(aligned_fasta)
+    if not sequences:
+        return aligned_fasta
+
+    query_sequence = sequences[0]
+    a3m_lines = []
+
+    for i, (desc, seq) in enumerate(zip(descriptions, sequences)):
+        a3m_lines.append(f">{desc}")
+        if i == 0:
+            a3m_lines.append(query_sequence.replace("-", ""))
+        else:
+            a3m_seq = msa_conversion.align_sequence_to_gapless_query(
+                sequence=seq, query_sequence=query_sequence
+            ).replace(".", "")
+            a3m_lines.append(a3m_seq)
+
+    return "\n".join(a3m_lines) + "\n"
+
+
 class Mmseqs(msa_tool.MsaTool):
     """Python wrapper for the MMseqs2 binary with GPU support."""
 
@@ -160,10 +194,10 @@ class Mmseqs(msa_tool.MsaTool):
                 output_dir=str(output_dir),
             )
 
-            # Step 6: Read the A3M output (single query produces file named "0")
+            # Step 6: Read the aligned FASTA output and convert to A3M
             a3m_file = output_dir / "0"
             if a3m_file.exists():
-                a3m_content = a3m_file.read_text()
+                a3m_content = convert_aligned_fasta_to_a3m(a3m_file.read_text())
             else:
                 # No hits found, return just the query sequence
                 logging.warning("No MSA hits found for query sequence.")
@@ -308,10 +342,10 @@ class Mmseqs(msa_tool.MsaTool):
                 output_dir=output_dir,
             )
 
-            # Step 6: Read the A3M output (single query produces file named "0")
+            # Step 6: Read the aligned FASTA output and convert to A3M
             a3m_file = pathlib.Path(output_dir) / "0"
             if a3m_file.exists():
-                a3m_content = a3m_file.read_text()
+                a3m_content = convert_aligned_fasta_to_a3m(a3m_file.read_text())
             else:
                 # No hits found, return just the query sequence
                 logging.warning("No MSA hits found for query sequence.")
@@ -402,7 +436,7 @@ class Mmseqs(msa_tool.MsaTool):
         result_db: str,
         msa_db: str,
     ) -> None:
-        """Converts search results to MSA in A3M format."""
+        """Converts search results to MSA in aligned FASTA format."""
         cmd = [
             self._binary_path,
             "result2msa",
@@ -411,7 +445,7 @@ class Mmseqs(msa_tool.MsaTool):
             result_db,
             msa_db,
             "--msa-format-mode",
-            "5",  # A3M format
+            "2",  # Aligned FASTA (preserves full UniProt headers for MSA pairing)
             # Note: No --threads limit to allow full CPU utilization
         ]
         subprocess_utils.run(
@@ -555,12 +589,12 @@ class Mmseqs(msa_tool.MsaTool):
                     output_dir=output_dir,
                 )
 
-            # Read result for this sequence
+            # Read result for this sequence and convert to A3M
             # For single query, file is named "0"
             # For batch queries, need to map seq_id to file index
             a3m_file = output_path / "0"
             if a3m_file.exists():
-                a3m_content = a3m_file.read_text()
+                a3m_content = convert_aligned_fasta_to_a3m(a3m_file.read_text())
             else:
                 logging.warning("No MSA hits found for sequence %s", seq_id)
                 a3m_content = f">{seq_id}\n{sequence}\n"

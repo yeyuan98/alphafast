@@ -28,7 +28,7 @@
 #   - ~800 GB free disk space (250 GB download + 540 GB MMseqs2 padded)
 #
 # Requirements (--from-prebuilt mode):
-#   - python3 with huggingface_hub installed (pip install huggingface_hub)
+#   - huggingface-cli in PATH (pip install huggingface_hub)
 #   - zstd, tar in PATH
 #   - ~569 GB free disk space
 #
@@ -88,7 +88,7 @@ done
 if [ "$FROM_PREBUILT" = true ]; then
     # Check prerequisites for HF download
     MISSING=0
-    for cmd in python3 tar zstd; do
+    for cmd in huggingface-cli tar zstd; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "ERROR: $cmd is not installed or not in PATH."
             MISSING=1
@@ -97,20 +97,12 @@ if [ "$FROM_PREBUILT" = true ]; then
     if [ "$MISSING" -ne 0 ]; then
         echo ""
         echo "Install missing dependencies before running this script."
-        echo "For python3: install huggingface_hub with: pip install huggingface_hub"
-        exit 1
-    fi
-
-    # Check huggingface_hub is importable
-    if ! python3 -c "import huggingface_hub" 2>/dev/null; then
-        echo "ERROR: huggingface_hub Python package is not installed."
-        echo "Install it with: pip install huggingface_hub"
+        echo "  pip install huggingface_hub"
         exit 1
     fi
 
     HF_REPO="RomeroLab-Duke/af3-mmseqs-db"
-    MMSEQS_DIR="${TARGET_DIR}/mmseqs"
-    mkdir -p "$TARGET_DIR" "$MMSEQS_DIR"
+    mkdir -p "$TARGET_DIR"
 
     echo "=========================================="
     echo "AlphaFast Database Setup (from HuggingFace)"
@@ -121,121 +113,36 @@ if [ "$FROM_PREBUILT" = true ]; then
     echo "=========================================="
     echo ""
 
-    # Download all files from HuggingFace to target directory
+    # Step 1: Download entire dataset repo
     echo "=== Step 1: Download pre-built databases from HuggingFace ==="
     echo ""
-
-    python3 - "$TARGET_DIR" "$HF_REPO" <<'PYEOF'
-import sys
-import os
-from pathlib import Path
-from collections import defaultdict
-
-from huggingface_hub import HfApi, hf_hub_download
-
-target_dir = Path(sys.argv[1])
-repo_id = sys.argv[2]
-
-api = HfApi()
-repo_files = api.list_repo_files(repo_id, repo_type="dataset")
-
-# Ignore .gitattributes and other metadata
-repo_files = [f for f in repo_files if not f.startswith(".")]
-print(f"Found {len(repo_files)} files in {repo_id}")
-print()
-
-# Separate regular files from .part* split files
-part_files = sorted(f for f in repo_files if ".part" in f)
-regular_files = sorted(f for f in repo_files if ".part" not in f)
-
-# Download regular files
-for repo_file in regular_files:
-    local_path = target_dir / repo_file
-
-    if local_path.exists() and local_path.stat().st_size > 0:
-        print(f"  SKIP: {repo_file} (exists)")
-        continue
-
-    # For mmcif tar files, check if already extracted
-    if "mmcif" in repo_file and repo_file.endswith((".tar", ".tar.zst")):
-        mmcif_dir = target_dir / "mmcif_files"
-        if mmcif_dir.exists() and any(mmcif_dir.iterdir()):
-            print(f"  SKIP: {repo_file} (mmcif_files/ already extracted)")
-            continue
-
-    print(f"  Downloading: {repo_file}...")
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    hf_hub_download(
-        repo_id=repo_id,
-        filename=repo_file,
-        repo_type="dataset",
-        local_dir=str(target_dir),
-    )
-    size_gb = local_path.stat().st_size / (1024**3) if local_path.exists() else 0
-    print(f"  DONE: {repo_file} ({size_gb:.1f} GB)")
-
-# Download and reassemble split .part* files
-if part_files:
-    part_groups = defaultdict(list)
-    for pf in part_files:
-        base = pf.rsplit(".part", 1)[0]
-        part_groups[base].append(pf)
-
-    for base_name, parts in sorted(part_groups.items()):
-        reassembled_path = target_dir / base_name
-
-        if reassembled_path.exists() and reassembled_path.stat().st_size > 0:
-            print(f"  SKIP: {base_name} (already reassembled)")
-            continue
-
-        # For mmcif tar, check if already extracted
-        if "mmcif" in base_name and base_name.endswith((".tar", ".tar.zst")):
-            mmcif_dir = target_dir / "mmcif_files"
-            if mmcif_dir.exists() and any(mmcif_dir.iterdir()):
-                print(f"  SKIP: {base_name} (mmcif_files/ already extracted)")
-                continue
-
-        print(f"  Downloading {len(parts)} parts for {base_name}...")
-        part_paths = []
-        for part_file in sorted(parts):
-            print(f"    Downloading: {part_file}...")
-            hf_hub_download(
-                repo_id=repo_id,
-                filename=part_file,
-                repo_type="dataset",
-                local_dir=str(target_dir),
-            )
-            part_paths.append(target_dir / part_file)
-            print(f"    DONE: {part_file}")
-
-        # Reassemble
-        reassembled_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"  Reassembling {base_name} from {len(part_paths)} parts...")
-        with open(reassembled_path, "wb") as out_f:
-            for p in sorted(part_paths):
-                with open(p, "rb") as in_f:
-                    while True:
-                        chunk = in_f.read(64 * 1024 * 1024)  # 64 MB chunks
-                        if not chunk:
-                            break
-                        out_f.write(chunk)
-
-        size_gb = reassembled_path.stat().st_size / (1024**3)
-        print(f"  Reassembled: {base_name} ({size_gb:.1f} GB)")
-
-        # Clean up parts
-        for p in part_paths:
-            p.unlink()
-        print(f"  Cleaned up {len(part_paths)} part files")
-
-print()
-print("HuggingFace download complete.")
-PYEOF
-
+    huggingface-cli download "$HF_REPO" --repo-type dataset --local-dir "$TARGET_DIR"
     echo ""
 
-    # Extract mmcif tar archive if present
-    echo "=== Step 2: Extract mmcif archive ==="
+    # Step 2: Reassemble split .part* files
+    echo "=== Step 2: Reassemble split files ==="
+    echo ""
+    # Find all .part00 files to discover split groups
+    find "$TARGET_DIR" -name '*.part00' | sort | while read -r part00; do
+        # Strip .part00 to get base path
+        base="${part00%.part00}"
+        base_name="$(basename "$base")"
+
+        if [ -f "$base" ]; then
+            echo "SKIP: ${base_name} (already reassembled)"
+            continue
+        fi
+
+        parts=("${base}".part*)
+        echo "Reassembling ${base_name} from ${#parts[@]} parts..."
+        cat "${parts[@]}" > "$base"
+        rm -f "${parts[@]}"
+        echo "Done: ${base_name}"
+    done
+    echo ""
+
+    # Step 3: Extract mmcif tar archive if present
+    echo "=== Step 3: Extract mmcif archive ==="
     MMCIF_DIR="${TARGET_DIR}/mmcif_files"
     for tar_name in "mmcif_files.tar.zst" "mmcif_files.tar"; do
         TAR_PATH="${TARGET_DIR}/${tar_name}"

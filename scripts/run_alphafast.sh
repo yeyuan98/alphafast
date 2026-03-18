@@ -38,6 +38,7 @@ CONTAINER="romerolabduke/alphafast:latest"
 BATCH_SIZE=""
 GPU_DEVICES=""
 BACKEND=""
+RNA_MMSEQS_DB_DIR=""
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -59,6 +60,9 @@ usage() {
     echo "  --gpu_devices IDS     Comma-separated GPU IDs (default: 0 for single,"
     echo "                        0,1,...,N-1 for multi)"
     echo "  --backend TYPE        Force 'docker' or 'singularity' (default: auto-detect)"
+    echo "  --rna_mmseqs_db_dir DIR  Use MMseqs2 nucleotide search instead of nhmmer"
+    echo "                        for RNA MSA. Requires pre-built databases from"
+    echo "                        scripts/build_rna_mmseqs_dbs.sh"
     exit 1
 }
 
@@ -73,6 +77,7 @@ while [ "$#" -gt 0 ]; do
         --batch_size)   BATCH_SIZE="$2"; shift 2 ;;
         --gpu_devices)  GPU_DEVICES="$2"; shift 2 ;;
         --backend)      BACKEND="$2"; shift 2 ;;
+        --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
         --help|-h)      usage ;;
         *)              echo "Unknown argument: $1"; usage ;;
     esac
@@ -171,6 +176,14 @@ run_container() {
     local gpu_spec="$1"
     shift
 
+    # Optional RNA MMseqs2 database mount
+    local rna_mount_docker=""
+    local rna_mount_singularity=""
+    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        rna_mount_docker="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        rna_mount_singularity="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+    fi
+
     if [ "$BACKEND" = "docker" ]; then
         docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -180,6 +193,7 @@ run_container() {
             -v "${WEIGHTS_DIR}:/data/models" \
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${OUTPUT_DIR}:/data/af_output" \
+            $rna_mount_docker \
             "$CONTAINER" \
             "$@"
     elif [ "$BACKEND" = "singularity" ]; then
@@ -190,6 +204,7 @@ run_container() {
             --bind "${WEIGHTS_DIR}:/data/models" \
             --bind "${INPUT_DIR}:/data/af_input" \
             --bind "${OUTPUT_DIR}:/data/af_output" \
+            $rna_mount_singularity \
             "$CONTAINER" \
             "$@"
     fi
@@ -210,6 +225,15 @@ if [ "$NUM_GPUS" -eq 1 ]; then
     echo "Log: $PIPELINE_LOG"
     echo ""
 
+    # Build RNA search flags: MMseqs2 nucleotide if --rna_mmseqs_db_dir is set,
+    # otherwise nhmmer (default).
+    RNA_FLAGS=""
+    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        RNA_FLAGS="--rna_mmseqs_db_dir=/data/rna_mmseqs_databases"
+    else
+        RNA_FLAGS="--nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+    fi
+
     run_container "$GPU_ID" \
         python /app/alphafold/run_data_pipeline.py \
         --input_dir=/data/af_input \
@@ -218,9 +242,7 @@ if [ "$NUM_GPUS" -eq 1 ]; then
         --mmseqs_db_dir=/data/mmseqs_databases \
         --use_mmseqs_gpu \
         --batch_size="$BATCH_SIZE" \
-        --nhmmer_binary_path=/usr/bin/nhmmer \
-        --hmmalign_binary_path=/usr/bin/hmmalign \
-        --hmmbuild_binary_path=/usr/bin/hmmbuild \
+        $RNA_FLAGS \
         2>&1 | tee "$PIPELINE_LOG"
 
     # Stage 2: Inference (loop over data JSONs)

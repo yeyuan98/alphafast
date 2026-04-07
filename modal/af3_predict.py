@@ -125,9 +125,9 @@ def _build_rna_flags() -> list[str]:
         return [f"--rna_mmseqs_db_dir={RNA_MMSEQS_DB_PATH}"]
     # Fallback to nhmmer
     return [
-        "--nhmmer_binary_path=/usr/bin/nhmmer",
-        "--hmmalign_binary_path=/usr/bin/hmmalign",
-        "--hmmbuild_binary_path=/usr/bin/hmmbuild",
+        "--nhmmer_binary_path=/hmmer/bin/nhmmer",
+        "--hmmalign_binary_path=/hmmer/bin/hmmalign",
+        "--hmmbuild_binary_path=/hmmer/bin/hmmbuild",
         f"--rnacentral_database_path={DATABASE_MOUNT_PATH}/rnacentral_active_seq_id_90_cov_80_linclust.fasta",
         f"--rfam_database_path={DATABASE_MOUNT_PATH}/rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
         f"--nt_database_path={DATABASE_MOUNT_PATH}/nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",

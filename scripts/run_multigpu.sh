@@ -175,11 +175,11 @@ for ((i=0; i<NUM_GPUS; i++)); do
   # Build RNA flags for this GPU
   RNA_GPU_FLAGS=""
   if [ -n "$USE_NHMMER" ]; then
-    RNA_GPU_FLAGS="--use_nhmmer --nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+    RNA_GPU_FLAGS="--use_nhmmer --nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
   elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
     RNA_GPU_FLAGS="--rna_mmseqs_db_dir=$RNA_MMSEQS_DB_DIR"
   else
-    RNA_GPU_FLAGS="--nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+    RNA_GPU_FLAGS="--nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
   fi
 
   CUDA_VISIBLE_DEVICES="${VISIBLE_GPU}" \

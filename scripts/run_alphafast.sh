@@ -236,14 +236,14 @@ if [ "$NUM_GPUS" -eq 1 ]; then
     # 4. Fall back to nhmmer if no MMseqs2 RNA databases found
     RNA_FLAGS=""
     if [ -n "$USE_NHMMER" ]; then
-        RNA_FLAGS="--use_nhmmer --nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+        RNA_FLAGS="--use_nhmmer --nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
     elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
         RNA_FLAGS="--rna_mmseqs_db_dir=/data/rna_mmseqs_databases"
     elif [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
         echo "Auto-detected RNA MMseqs2 databases at ${DB_DIR}/mmseqs_rna"
         RNA_FLAGS="--rna_mmseqs_db_dir=/data/public_databases/mmseqs_rna"
     else
-        RNA_FLAGS="--nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+        RNA_FLAGS="--nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
     fi
 
     run_container "$GPU_ID" \

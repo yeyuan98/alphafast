@@ -214,15 +214,43 @@ def classify_structure(mmcif_text: str) -> dict:
             dna_chains += 1
             total_residues += seq_len
 
-    # Count non-polymer entities (ligands)
+    # Count non-polymer entities (ligands), excluding common crystallization
+    # artifacts and ions that are not biologically meaningful ligands.
+    # Without this filter, almost every structure has ligand_count > 0 (due to
+    # buffer/cryo molecules), making the protein-monomer category nearly empty.
+    _ARTIFACT_CCD_CODES = frozenset({
+        # Ions
+        "NA", "CL", "MG", "ZN", "CA", "K", "MN", "FE", "FE2", "CO", "NI",
+        "CU", "CU1", "CD", "IOD", "BR", "XE",
+        # Common buffers / cryo / crystallization agents
+        "SO4", "PO4", "GOL", "EDO", "PEG", "PGE", "MPD", "DMS", "ACT",
+        "FMT", "TRS", "CIT", "BME", "MES", "EPE", "IMD", "SCN", "NO3",
+        "AZI", "1PE", "P6G", "MLI", "TAR", "SUC", "NH4",
+        # Water-like
+        "HOH", "DOD",
+    })
     entity_all = _parse_loop_block(mmcif_text, "_entity.type")
-    ligand_count = 0
+    nonpoly_entity_ids = set()
     for row in entity_all:
         etype = row.get("_entity.type", "").lower()
         if etype == "non-polymer":
+            nonpoly_entity_ids.add(row.get("_entity.id", ""))
+        # water entities are skipped
+
+    # Resolve CCD codes for non-polymer entities to filter artifacts
+    ligand_rows = _parse_loop_block(mmcif_text, "_pdbx_entity_nonpoly.comp_id")
+    entity_ccd_map = {}
+    for row in ligand_rows:
+        eid = row.get("_pdbx_entity_nonpoly.entity_id", "")
+        ccd = row.get("_pdbx_entity_nonpoly.comp_id", "")
+        if ccd and ccd not in ("?", "."):
+            entity_ccd_map[eid] = ccd
+
+    ligand_count = 0
+    for eid in nonpoly_entity_ids:
+        ccd = entity_ccd_map.get(eid, "")
+        if ccd.upper() not in _ARTIFACT_CCD_CODES:
             ligand_count += 1
-        elif etype == "water":
-            pass  # skip water
 
     info["n_protein"] = protein_chains
     info["n_rna"] = rna_chains

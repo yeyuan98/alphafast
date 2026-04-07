@@ -651,6 +651,13 @@ def check_status():
     # Protein FASTAs are deleted after MMseqs conversion to save space.
     required_dbs = [
         ("mmcif_files", "directory"),
+    ]
+    rna_dbs = [
+        ("mmseqs_rna/rfam.dbtype", "file"),
+        ("mmseqs_rna/rnacentral.dbtype", "file"),
+        ("mmseqs_rna/nt_rna.dbtype", "file"),
+    ]
+    rna_fasta_dbs = [
         ("rnacentral_active_seq_id_90_cov_80_linclust.fasta", "file"),
         ("nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta", "file"),
         ("rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta", "file"),
@@ -692,6 +699,29 @@ def check_status():
             mmseqs_complete = False
         status = "+" if exists else "-"
         print(f"  [{status}] {db_name}_padded")
+
+    print()
+    print("RNA MMseqs2 Databases (default RNA search):")
+    rna_mmseqs_complete = True
+    for name, db_type in rna_dbs:
+        path = db_path / name
+        exists = path.exists() and path.stat().st_size > 0
+        if not exists:
+            rna_mmseqs_complete = False
+        status = "+" if exists else "-"
+        print(f"  [{status}] {name}")
+
+    print()
+    print("RNA FASTA Databases (nhmmer fallback):")
+    for name, db_type in rna_fasta_dbs:
+        path = db_path / name
+        exists = path.exists() and path.stat().st_size > 0
+        status = "+" if exists else "-"
+        if exists:
+            size_gb = path.stat().st_size / (1024**3)
+            print(f"  [{status}] {name}: {size_gb:.1f} GB")
+        else:
+            print(f"  [{status}] {name}")
 
     # Check for unconverted protein FASTAs (should be deleted after conversion)
     unconverted = []

@@ -52,8 +52,17 @@ MMSEQS_THREADS="${7:-}"
 
 export DB_DIR="${DB_DIR:-/data/public_databases}"
 export MMSEQS_DB_DIR="${MMSEQS_DB_DIR:-/data/mmseqs_databases}"
-export RNA_MMSEQS_DB_DIR="${RNA_MMSEQS_DB_DIR:-}"
 export MODEL_DIR="${MODEL_DIR:-/data/models}"
+
+# RNA search configuration: auto-detect mmseqs_rna/ unless USE_NHMMER is set.
+export USE_NHMMER="${USE_NHMMER:-}"
+export RNA_MMSEQS_DB_DIR="${RNA_MMSEQS_DB_DIR:-}"
+if [ -z "$USE_NHMMER" ] && [ -z "$RNA_MMSEQS_DB_DIR" ]; then
+    if [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        RNA_MMSEQS_DB_DIR="${DB_DIR}/mmseqs_rna"
+        echo "Auto-detected RNA MMseqs2 databases at ${RNA_MMSEQS_DB_DIR}"
+    fi
+fi
 export LOG_DIR="${LOG_DIR:-${AF_OUTPUT_DIR}/logs}"
 RUN_DATA_PIPELINE_PATH="${RUN_DATA_PIPELINE_PATH:-/app/alphafold/run_data_pipeline.py}"
 RUN_ALPHAFOLD_PATH="${RUN_ALPHAFOLD_PATH:-/app/alphafold/run_alphafold.py}"
@@ -163,6 +172,16 @@ for ((i=0; i<NUM_GPUS; i++)); do
 
   echo "  Starting MSA on GPU ${GPU_IDX} (${PART_COUNT} inputs, batch_size=${GPU_BATCH_SIZE})"
 
+  # Build RNA flags for this GPU
+  RNA_GPU_FLAGS=""
+  if [ -n "$USE_NHMMER" ]; then
+    RNA_GPU_FLAGS="--use_nhmmer --nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+  elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+    RNA_GPU_FLAGS="--rna_mmseqs_db_dir=$RNA_MMSEQS_DB_DIR"
+  else
+    RNA_GPU_FLAGS="--nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+  fi
+
   CUDA_VISIBLE_DEVICES="${VISIBLE_GPU}" \
     python "$RUN_DATA_PIPELINE_PATH" \
     --input_dir="$PARTITION_DIR" \
@@ -173,10 +192,7 @@ for ((i=0; i<NUM_GPUS; i++)); do
     --mmseqs_n_threads="$MMSEQS_THREADS" \
     --batch_size="$GPU_BATCH_SIZE" \
     ${TEMP_DIR:+--temp_dir="$TEMP_DIR"} \
-    --nhmmer_binary_path=/usr/bin/nhmmer \
-    --hmmalign_binary_path=/usr/bin/hmmalign \
-    --hmmbuild_binary_path=/usr/bin/hmmbuild \
-    ${RNA_MMSEQS_DB_DIR:+--rna_mmseqs_db_dir="$RNA_MMSEQS_DB_DIR"} \
+    $RNA_GPU_FLAGS \
     > "$MSA_LOG" 2>&1 &
   MSA_PIDS+=("$!")
   MSA_LOGS+=("$MSA_LOG")

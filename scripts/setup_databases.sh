@@ -5,37 +5,30 @@
 # a derivative work of AlphaFold 3 by DeepMind Technologies Limited.
 # https://creativecommons.org/licenses/by-nc-sa/4.0/
 #
-# Download AlphaFold 3 databases and convert protein DBs to MMseqs2 GPU format.
+# Download AlphaFold 3 databases for AlphaFast.
 #
-# This is the single setup script for AlphaFast. It downloads all required
-# databases from Google Cloud Storage: protein FASTA files are converted to
-# MMseqs2 padded databases for GPU-accelerated MSA search, and RNA FASTA files
-# are downloaded as-is for nhmmer-based RNA MSA search (HMMER suite).
+# Default mode downloads pre-built databases from HuggingFace (recommended).
+# Use --from-source to build from Google Cloud Storage FASTA files instead.
 #
 # Usage:
-#   ./scripts/setup_databases.sh <target_dir> [--keep-fasta]
+#   ./scripts/setup_databases.sh <target_dir> [OPTIONS]
 #
 # Arguments:
-#   target_dir:    Directory where databases will be downloaded and converted
-#   --keep-fasta:  Keep raw FASTA files after MMseqs2 conversion (default: keep)
-#                  Use --no-keep-fasta to remove them after conversion
+#   target_dir:    Directory where databases will be stored
 #
-# Requirements:
+# Requirements (default / HuggingFace mode):
+#   - hf CLI (HuggingFace): curl -LsSf https://hf.co/cli/install.sh | bash -s
+#   - zstd, tar in PATH (for mmCIF extraction)
+#   - ~800 GB free disk space
+#
+# Requirements (--from-source mode):
 #   - wget, zstd, tar in PATH
 #   - mmseqs (GPU version) in PATH
 #   - ~800 GB free disk space (250 GB download + 540 GB MMseqs2 padded)
-#   - (optional) nhmmer, hmmalign, hmmbuild for RNA MSA search
-#     Install: conda install -c bioconda hmmer
 #
 # Output directory structure:
 #   <target_dir>/
 #     mmcif_files/              # PDB structures for template retrieval
-#     uniref90_2022_05.fa       # Raw protein FASTA (if kept)
-#     mgy_clusters_2022_05.fa
-#     ...
-#     rnacentral_active_seq_id_90_cov_80_linclust.fasta   # RNA (nhmmer)
-#     rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta      # RNA (nhmmer)
-#     nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta  # RNA (nhmmer)
 #     mmseqs/
 #       uniref90_padded*        # MMseqs2 GPU-ready databases (protein)
 #       mgnify_padded*
@@ -43,9 +36,12 @@
 #       uniprot_padded*
 #       pdb_seqres_padded*
 #     mmseqs_rna/
-#       rfam*                   # MMseqs2 nucleotide databases (optional)
+#       rfam*                   # MMseqs2 nucleotide databases (RNA, default)
 #       rnacentral*
 #       nt_rna*
+#     rnacentral_active_seq_id_90_cov_80_linclust.fasta   # RNA FASTA (nhmmer fallback)
+#     rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta      # RNA FASTA (nhmmer fallback)
+#     nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta  # RNA FASTA (nhmmer fallback)
 
 set -euo pipefail
 
@@ -55,21 +51,22 @@ set -euo pipefail
 usage() {
     echo "Usage: $0 <target_dir> [OPTIONS]"
     echo ""
-    echo "Downloads AlphaFold 3 databases and converts protein DBs to MMseqs2 GPU format."
+    echo "Downloads AlphaFold 3 databases for AlphaFast."
+    echo ""
+    echo "Default mode downloads pre-built databases from HuggingFace (recommended)."
+    echo "Use --from-source to build from Google Cloud Storage FASTA files."
     echo ""
     echo "Arguments:"
     echo "  target_dir           Directory where databases will be stored"
     echo ""
     echo "Options:"
-    echo "  --keep-fasta         Keep raw FASTA files after conversion (default)"
-    echo "  --no-keep-fasta      Remove raw FASTA files after conversion"
-    echo "  --from-prebuilt      Download pre-built MMseqs2 databases from HuggingFace"
-    echo "                       instead of building from FASTA. Skips FASTA download"
-    echo "                       and MMseqs2 conversion. Requires hf CLI."
-    echo "  --mmseqs-only        Download only MMseqs2 padded databases and mmCIF"
-    echo "                       structures. Skips RNA FASTA downloads (use nhmmer"
-    echo "                       from pre-built or build separately)."
-    echo "  --all                Download everything: FASTA, MMseqs2, RNA, mmCIF (default)"
+    echo "  --from-source        Build from FASTA files (Google Cloud Storage)."
+    echo "                       Requires wget, zstd, tar, mmseqs in PATH."
+    echo "  --protein-only       Download only protein databases and mmCIF structures."
+    echo "                       Skips RNA databases (both FASTA and MMseqs2)."
+    echo "  --all                Download everything: protein + RNA databases (default)"
+    echo "  --keep-fasta         Keep raw FASTA files after conversion (default, --from-source only)"
+    echo "  --no-keep-fasta      Remove raw FASTA files after conversion (--from-source only)"
     exit 1
 }
 
@@ -81,15 +78,17 @@ TARGET_DIR="$1"
 shift
 
 KEEP_FASTA=true
-FROM_PREBUILT=false
-DB_SCOPE="all"  # "all" or "mmseqs-only"
+FROM_PREBUILT=true  # HuggingFace is the default
+DB_SCOPE="all"  # "all" or "protein-only"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --keep-fasta)    KEEP_FASTA=true; shift ;;
         --no-keep-fasta) KEEP_FASTA=false; shift ;;
         --from-prebuilt) FROM_PREBUILT=true; shift ;;
-        --mmseqs-only)   DB_SCOPE="mmseqs-only"; shift ;;
+        --from-source)   FROM_PREBUILT=false; shift ;;
+        --protein-only)  DB_SCOPE="protein-only"; shift ;;
+        --mmseqs-only)   DB_SCOPE="protein-only"; shift ;;  # backwards compat alias
         --all)           DB_SCOPE="all"; shift ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -100,9 +99,13 @@ done
 # ---------------------------------------------------------------------------
 MISSING=0
 if $FROM_PREBUILT; then
-    for cmd in hf; do
+    for cmd in hf tar zstd; do
         if ! command -v "$cmd" &> /dev/null; then
-            echo "ERROR: $cmd is not installed. Install with: curl -LsSf https://hf.co/cli/install.sh | bash -s"
+            if [ "$cmd" = "hf" ]; then
+                echo "ERROR: $cmd is not installed. Install with: curl -LsSf https://hf.co/cli/install.sh | bash -s"
+            else
+                echo "ERROR: $cmd is not installed or not in PATH."
+            fi
             MISSING=1
         fi
     done
@@ -117,7 +120,10 @@ fi
 if [ "$MISSING" -ne 0 ]; then
     echo ""
     echo "Install missing dependencies before running this script."
-    if ! $FROM_PREBUILT; then
+    if $FROM_PREBUILT; then
+        echo "For HuggingFace CLI:"
+        echo "  curl -LsSf https://hf.co/cli/install.sh | bash -s"
+    else
         echo "For mmseqs with GPU support:"
         echo "  wget https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz"
         echo "  tar xzf mmseqs-linux-gpu.tar.gz"
@@ -136,6 +142,12 @@ fi
 readonly SOURCE="https://storage.googleapis.com/alphafold-databases/v3.0"
 readonly HF_REPO="RomeroLab-Duke/af3-mmseqs-db"
 MMSEQS_DIR="${TARGET_DIR}/mmseqs"
+RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
+RNA_FASTAS=(
+    "rnacentral_active_seq_id_90_cov_80_linclust.fasta"
+    "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta"
+    "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta"
+)
 
 mkdir -p "$TARGET_DIR" "$MMSEQS_DIR"
 
@@ -183,9 +195,20 @@ if $FROM_PREBUILT; then
     fi
     echo ""
 
-    # Download RNA FASTA databases (for nhmmer mode)
     if [ "$DB_SCOPE" = "all" ]; then
-        echo "Downloading RNA FASTA databases..."
+        # Download RNA MMseqs2 nucleotide databases (pre-indexed, used by default)
+        RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
+        if [ -f "${RNA_MMSEQS_DIR}/rfam.dbtype" ]; then
+            echo "SKIP: RNA MMseqs2 databases already exist"
+        else
+            echo "Downloading RNA MMseqs2 nucleotide databases (pre-indexed)..."
+            hf download "$HF_REPO" --repo-type dataset --include "mmseqs_rna/*" --local-dir "$TARGET_DIR"
+            echo "Done: RNA MMseqs2 databases"
+        fi
+        echo ""
+
+        # Download RNA FASTA databases (for nhmmer fallback)
+        echo "Downloading RNA FASTA databases (for nhmmer fallback)..."
         hf download "$HF_REPO" --repo-type dataset --include "*.fasta" --include "*.fasta.*" --local-dir "$TARGET_DIR"
         # Reassemble any split files
         for part_prefix in "${TARGET_DIR}"/*.fasta.part00; do
@@ -198,18 +221,10 @@ if $FROM_PREBUILT; then
         done
         echo "Done: RNA FASTA databases"
         echo ""
-    fi
-
-    # Download RNA MMseqs2 nucleotide databases (pre-indexed)
-    RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
-    if [ -f "${RNA_MMSEQS_DIR}/rfam.dbtype" ]; then
-        echo "SKIP: RNA MMseqs2 databases already exist"
     else
-        echo "Downloading RNA MMseqs2 nucleotide databases (pre-indexed)..."
-        hf download "$HF_REPO" --repo-type dataset --include "mmseqs_rna/*" --local-dir "$TARGET_DIR"
-        echo "Done: RNA MMseqs2 databases"
+        echo "SKIP: RNA databases (--protein-only mode)"
+        echo ""
     fi
-    echo ""
 
     echo "=== Pre-built download complete ==="
     echo ""
@@ -285,7 +300,7 @@ if [ "$DB_SCOPE" = "all" ]; then
         fi
     done
 else
-    echo "SKIP: RNA FASTA downloads (--mmseqs-only mode)"
+    echo "SKIP: RNA FASTA downloads (--protein-only mode)"
 fi
 echo ""
 
@@ -339,7 +354,7 @@ if [ "$DB_SCOPE" = "all" ]; then
     done
     echo ""
 else
-    echo "SKIP: RNA MMseqs2 database build (--mmseqs-only mode)"
+    echo "SKIP: RNA MMseqs2 database build (--protein-only mode)"
     echo ""
     RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
 fi
@@ -439,21 +454,21 @@ echo "Database directory:  $TARGET_DIR"
 echo "MMseqs2 directory:   $MMSEQS_DIR"
 echo "mmCIF directory:     ${TARGET_DIR}/mmcif_files"
 echo ""
-echo "RNA databases (for nhmmer):"
-for rna_f in "${RNA_FASTAS[@]}"; do
-    if [ -f "${TARGET_DIR}/${rna_f}" ]; then
-        echo "  OK: ${rna_f}"
-    else
-        echo "  MISSING: ${rna_f}"
-    fi
-done
-echo ""
-echo "RNA MMseqs2 databases (for --rna_mmseqs_db_dir, optional):"
+echo "RNA MMseqs2 databases (default RNA search):"
 for rna_db in rfam rnacentral nt_rna; do
     if [ -f "${RNA_MMSEQS_DIR}/${rna_db}.dbtype" ]; then
         echo "  OK: ${rna_db}"
     else
         echo "  NOT BUILT: ${rna_db}"
+    fi
+done
+echo ""
+echo "RNA FASTA databases (nhmmer fallback, --use_nhmmer):"
+for rna_f in "${RNA_FASTAS[@]}"; do
+    if [ -f "${TARGET_DIR}/${rna_f}" ]; then
+        echo "  OK: ${rna_f}"
+    else
+        echo "  MISSING: ${rna_f}"
     fi
 done
 echo ""

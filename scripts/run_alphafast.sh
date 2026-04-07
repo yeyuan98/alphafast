@@ -39,6 +39,7 @@ BATCH_SIZE=""
 GPU_DEVICES=""
 BACKEND=""
 RNA_MMSEQS_DB_DIR=""
+USE_NHMMER=""
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -63,6 +64,8 @@ usage() {
     echo "  --rna_mmseqs_db_dir DIR  Use MMseqs2 nucleotide search instead of nhmmer"
     echo "                        for RNA MSA. Requires pre-built databases from"
     echo "                        scripts/build_rna_mmseqs_dbs.sh"
+    echo "                        Auto-detected from <db_dir>/mmseqs_rna/ if present."
+    echo "  --use_nhmmer          Force nhmmer for RNA MSA search (skip MMseqs2 auto-detect)"
     exit 1
 }
 
@@ -78,6 +81,7 @@ while [ "$#" -gt 0 ]; do
         --gpu_devices)  GPU_DEVICES="$2"; shift 2 ;;
         --backend)      BACKEND="$2"; shift 2 ;;
         --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
+        --use_nhmmer)   USE_NHMMER="true"; shift ;;
         --help|-h)      usage ;;
         *)              echo "Unknown argument: $1"; usage ;;
     esac
@@ -225,11 +229,19 @@ if [ "$NUM_GPUS" -eq 1 ]; then
     echo "Log: $PIPELINE_LOG"
     echo ""
 
-    # Build RNA search flags: MMseqs2 nucleotide if --rna_mmseqs_db_dir is set,
-    # otherwise nhmmer (default).
+    # Build RNA search flags:
+    # 1. If --use_nhmmer is set, force nhmmer mode
+    # 2. If --rna_mmseqs_db_dir is explicitly set, use that
+    # 3. Auto-detect <db_dir>/mmseqs_rna/ for MMseqs2 nucleotide search
+    # 4. Fall back to nhmmer if no MMseqs2 RNA databases found
     RNA_FLAGS=""
-    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+    if [ -n "$USE_NHMMER" ]; then
+        RNA_FLAGS="--use_nhmmer --nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
+    elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
         RNA_FLAGS="--rna_mmseqs_db_dir=/data/rna_mmseqs_databases"
+    elif [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        echo "Auto-detected RNA MMseqs2 databases at ${DB_DIR}/mmseqs_rna"
+        RNA_FLAGS="--rna_mmseqs_db_dir=/data/public_databases/mmseqs_rna"
     else
         RNA_FLAGS="--nhmmer_binary_path=/usr/bin/nhmmer --hmmalign_binary_path=/usr/bin/hmmalign --hmmbuild_binary_path=/usr/bin/hmmbuild"
     fi
@@ -270,23 +282,47 @@ else
     MSA_OUTPUT_DIR="${OUTPUT_DIR}/msa_output"
     mkdir -p "$MSA_OUTPUT_DIR"
 
+    # Determine RNA MMseqs2 DB path for multi-GPU container.
+    # run_multigpu.sh reads RNA_MMSEQS_DB_DIR from environment.
+    MULTIGPU_RNA_DB_DIR=""
+    if [ -n "$USE_NHMMER" ]; then
+        : # No RNA MMseqs2 DB — nhmmer will be used by run_data_pipeline.py via --use_nhmmer
+    elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        MULTIGPU_RNA_DB_DIR="/data/rna_mmseqs_databases"
+    elif [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        MULTIGPU_RNA_DB_DIR="/data/public_databases/mmseqs_rna"
+    fi
+
+    # Optional RNA MMseqs2 mount
+    RNA_DOCKER_MOUNT=""
+    RNA_SINGULARITY_BIND=""
+    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        RNA_DOCKER_MOUNT="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        RNA_SINGULARITY_BIND="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+    fi
+
     if [ "$BACKEND" = "docker" ]; then
         docker run --rm \
             --user "$(id -u):$(id -g)" \
             --gpus all \
             -e CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+            -e RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
+            -e USE_NHMMER="${USE_NHMMER}" \
             -v "${DB_DIR}:/data/public_databases" \
             -v "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
             -v "${WEIGHTS_DIR}:/data/models" \
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
             -v "${OUTPUT_DIR}:/data/af_output" \
+            $RNA_DOCKER_MOUNT \
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
                 $NUM_GPUS $BATCH_SIZE $GPU_DEVICES"
     elif [ "$BACKEND" = "singularity" ]; then
         SINGULARITYENV_CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+        SINGULARITYENV_RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
+        SINGULARITYENV_USE_NHMMER="${USE_NHMMER}" \
         singularity exec --nv \
             --bind "${DB_DIR}:/data/public_databases" \
             --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
@@ -294,6 +330,7 @@ else
             --bind "${INPUT_DIR}:/data/af_input" \
             --bind "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
             --bind "${OUTPUT_DIR}:/data/af_output" \
+            $RNA_SINGULARITY_BIND \
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \

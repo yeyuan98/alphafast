@@ -233,6 +233,15 @@ if $FROM_PREBUILT; then
   else
     echo "Downloading protein MMseqs2 padded databases..."
     hf download "$HF_REPO" --repo-type dataset --include "mmseqs/*" --local-dir "$TARGET_DIR"
+    # Reassemble any split .partNN files (HuggingFace splits large files)
+    for part_prefix in "${MMSEQS_DIR}"/*.part00; do
+      if [ -f "$part_prefix" ]; then
+        base="${part_prefix%.part00}"
+        echo "Reassembling $(basename "$base")..."
+        cat "${base}.part"* > "$base"
+        rm -f "${base}.part"*
+      fi
+    done
     echo "Done: Protein MMseqs2 databases"
   fi
   echo ""
@@ -279,6 +288,15 @@ if $FROM_PREBUILT; then
       # Download everything including pre-built indices (default)
       echo "Downloading RNA MMseqs2 nucleotide databases (with pre-built indices)..."
       hf download "$HF_REPO" --repo-type dataset --include "mmseqs_rna/*" --local-dir "$TARGET_DIR"
+      # Reassemble any split .partNN files
+      for part_prefix in "${RNA_MMSEQS_DIR}"/*.part00; do
+        if [ -f "$part_prefix" ]; then
+          base="${part_prefix%.part00}"
+          echo "Reassembling $(basename "$base")..."
+          cat "${base}.part"* > "$base"
+          rm -f "${base}.part"*
+        fi
+      done
       echo "Done: RNA MMseqs2 databases"
     fi
     echo ""

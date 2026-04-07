@@ -19,7 +19,7 @@ FROM nvidia/cuda:12.6.3-base-ubuntu24.04
 RUN DEBIAN_FRONTEND=noninteractive \
     apt-get update --quiet \
     && apt-get install --yes --quiet python3.12 python3.12-dev \
-    && apt-get install --yes --quiet git wget gcc g++ make zlib1g-dev zstd pigz hmmer \
+    && apt-get install --yes --quiet git wget gcc g++ make zlib1g-dev zstd pigz \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -31,7 +31,22 @@ ENV UV_COMPILE_BYTECODE=0
 # Read local venv
 ENV UV_PROJECT_ENVIRONMENT=/alphafold3_venv
 RUN uv venv $UV_PROJECT_ENVIRONMENT
-ENV PATH="/alphafold3_venv/bin:$PATH"
+ENV PATH="/hmmer/bin:/alphafold3_venv/bin:$PATH"
+
+# Install HMMER from source (matching upstream AF3).
+# Build from source to get exact version 3.4 with the --seq_limit patch.
+# nhmmer (RNA MSA search fallback) is included in the HMMER suite.
+COPY docker/jackhmmer_seq_limit.patch /hmmer_build/
+RUN mkdir -p /hmmer_build /hmmer && \
+    wget -q http://eddylab.org/software/hmmer/hmmer-3.4.tar.gz -P /hmmer_build && \
+    (cd /hmmer_build && echo "ca70d94fd0cf271bd7063423aabb116d42de533117343a9b27a65c17ff06fbf3 hmmer-3.4.tar.gz" | sha256sum --check) && \
+    (cd /hmmer_build && tar zxf hmmer-3.4.tar.gz && rm hmmer-3.4.tar.gz) && \
+    (cd /hmmer_build && patch -p0 < jackhmmer_seq_limit.patch) && \
+    (cd /hmmer_build/hmmer-3.4 && ./configure --prefix /hmmer) && \
+    (cd /hmmer_build/hmmer-3.4 && make -j$(nproc)) && \
+    (cd /hmmer_build/hmmer-3.4 && make install) && \
+    (cd /hmmer_build/hmmer-3.4/easel && make install) && \
+    rm -rf /hmmer_build
 
 # Install MMSeqs2-GPU and Foldseek
 RUN wget -q -O mmseqs.tar.gz https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz & \

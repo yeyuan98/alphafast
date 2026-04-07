@@ -1300,24 +1300,26 @@ class DataPipeline:
             else:
                 other_indices.append(idx)
 
-        # Launch RNA searches in a single background thread (CPU-only).
-        # Runs concurrently with the protein GPU searches below.
-        # max_workers=1: sequences searched sequentially to avoid CPU
-        # oversubscription (each search already uses multiple threads).
+        # Launch ALL RNA chain processing in a background thread (CPU-only)
+        # so it runs concurrently with protein GPU searches below.
+        # This applies whether RNA search is configured (nhmmer/MMseqs2
+        # nucleotide) or not (empty MSA) — either way, we don't want
+        # RNA processing to block the GPU protein search path.
         rna_futures: dict[int, futures.Future[folding_input.RnaChain]] = {}
         rna_executor = None
 
-        if rna_chains and self._nhmmer_enabled:
+        if rna_chains:
             rna_executor = futures.ThreadPoolExecutor(max_workers=1)
             for idx, chain in rna_chains:
                 logging.info(
-                    "Submitting RNA chain %s to background search...", chain.id,
+                    "Submitting RNA chain %s to background processing...",
+                    chain.id,
                 )
                 rna_futures[idx] = rna_executor.submit(
                     self.process_rna_chain, chain,
                 )
 
-        # Process protein chains (GPU-bound, runs while nhmmer threads work).
+        # Process protein chains (GPU-bound, runs while RNA threads work).
         processed_chains: dict[int, folding_input.Chain] = {}
         for idx in protein_indices:
             chain = fold_input.chains[idx]
@@ -1333,11 +1335,7 @@ class DataPipeline:
         # Collect RNA results (should already be done or nearly done).
         for idx, chain in rna_chains:
             chain_start = time.time()
-            if idx in rna_futures:
-                processed_chains[idx] = rna_futures[idx].result()
-            else:
-                # nhmmer not enabled — process synchronously (fast, empty MSA)
-                processed_chains[idx] = self.process_rna_chain(chain)
+            processed_chains[idx] = rna_futures[idx].result()
             logging.info(
                 "RNA chain %s completed in %.2f seconds",
                 chain.id,

@@ -544,6 +544,18 @@ def main(_):
             print("Using nhmmer for RNA MSA search (--use_nhmmer flag)")
         else:
             print("Falling back to nhmmer for RNA MSA search (no mmseqs_rna/ found)")
+    elif use_nhmmer:
+        # No mmseqs_rna found and nhmmer not configured — RNA chains will
+        # get query-only MSA (no search performed).
+        nhmmer_rnacentral = None
+        nhmmer_rfam = None
+        nhmmer_nt = None
+        if _USE_NHMMER.value:
+            print("WARNING: --use_nhmmer set but --nhmmer_binary_path not provided. "
+                  "RNA chains will get empty MSA.")
+        else:
+            print("WARNING: No RNA search configured (no mmseqs_rna/ found, "
+                  "nhmmer not configured). RNA chains will get empty MSA.")
     else:
         nhmmer_rnacentral = None
         nhmmer_rfam = None

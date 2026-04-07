@@ -249,6 +249,8 @@ def classify_structure(mmcif_text: str) -> dict:
     ligand_count = 0
     for eid in nonpoly_entity_ids:
         ccd = entity_ccd_map.get(eid, "")
+        if not ccd:
+            continue  # no CCD code resolved — skip (likely an artifact)
         if ccd.upper() not in _ARTIFACT_CCD_CODES:
             ligand_count += 1
 

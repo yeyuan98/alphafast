@@ -315,6 +315,11 @@ else
         RNA_SINGULARITY_BIND="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
     fi
 
+    # Inside the container, CUDA_VISIBLE_DEVICES remaps physical device IDs
+    # (e.g. 6,7) to logical indices (0,1). Pass logical indices to
+    # run_multigpu.sh so map_visible_gpu() works correctly.
+    LOGICAL_GPU_LIST=$(seq -s, 0 $((NUM_GPUS - 1)))
+
     if [ "$BACKEND" = "docker" ]; then
         docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -332,7 +337,7 @@ else
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
-                $NUM_GPUS $BATCH_SIZE $GPU_DEVICES"
+                $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     elif [ "$BACKEND" = "singularity" ]; then
         SINGULARITYENV_CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
         SINGULARITYENV_RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
@@ -348,7 +353,7 @@ else
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
-                $NUM_GPUS $BATCH_SIZE $GPU_DEVICES"
+                $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     fi
 fi
 

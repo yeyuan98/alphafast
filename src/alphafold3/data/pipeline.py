@@ -825,14 +825,13 @@ class DataPipeline:
 
         sequences_by_id = {seq_to_id[seq]: seq for seq in unique_rna_seqs}
 
-        # Search each RNA database with the full batch.
-        # Databases run sequentially (CPU-bound, avoid oversubscription).
-        per_db_results: list[mmseqs_batch.BatchSearchResult] = []
-
-        for run_config in self._rna_msa_configs:
+        # Search all RNA databases in parallel (CPU-bound, no GPU).
+        # Each database search uses its own threads (typically 16), so 3
+        # parallel searches use ~48 threads total — well within typical
+        # server capacity and avoids serializing 3 independent searches.
+        def _search_one_rna_db(run_config):
             assert isinstance(run_config.config, msa_config.MmseqsConfig)
             cfg = run_config.config
-
             searcher = mmseqs_batch.MmseqsBatch(
                 binary_path=cfg.binary_path,
                 database_path=cfg.database_config.path,
@@ -843,14 +842,21 @@ class DataPipeline:
                 threads=cfg.threads,
                 search_type=cfg.search_type,
             )
-
             logging.info(
                 "Batched RNA search: %d sequences against %s",
                 len(sequences_by_id),
                 cfg.database_config.name,
             )
-            result = searcher.search_batch(sequences_by_id)
-            per_db_results.append(result)
+            return searcher.search_batch(sequences_by_id)
+
+        with futures.ThreadPoolExecutor(
+            max_workers=len(self._rna_msa_configs)
+        ) as db_executor:
+            rna_db_futures = [
+                db_executor.submit(_search_one_rna_db, rc)
+                for rc in self._rna_msa_configs
+            ]
+            per_db_results = [f.result() for f in rna_db_futures]
 
         # Merge per-database results for each sequence (same merge logic as
         # _get_nhmmer_msa: combine MSAs from all databases, deduplicate).

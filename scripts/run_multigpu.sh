@@ -11,7 +11,7 @@
 # parallel (Phase 2). This provides clean timing separation for benchmarking
 # while achieving near-perfect linear scaling.
 #
-# Usage (inside container):
+# Usage (inside container, called by run_alphafast.sh):
 #   scripts/run_multigpu.sh <input_dir> <msa_output_dir> <af_output_dir> \
 #       <num_gpus> [batch_size] [gpu_list] [mmseqs_threads]
 #
@@ -19,9 +19,9 @@
 #   input_dir       - Directory containing input JSON files
 #   msa_output_dir  - Output directory for MSA JSONs
 #   af_output_dir   - Output directory for inference outputs
-#   num_gpus        - Number of GPUs to use
+#   num_gpus        - Number of GPUs (derived from gpu_list by caller)
 #   batch_size      - Batch size per GPU for MSA (default: 512)
-#   gpu_list        - Comma-separated GPU indices (default: 0,1,...,N-1)
+#   gpu_list        - Comma-separated GPU device indices (e.g. "6,7")
 #   mmseqs_threads  - CPU threads per GPU (default: total_cores / num_gpus)
 
 set -euo pipefail
@@ -125,6 +125,10 @@ echo "=========================================="
 START_TIME=$(date +%s)
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_LIST"
+
+# GPU_ARRAY is the authoritative source for how many GPUs to use.
+# Override NUM_GPUS if it disagrees with the actual device list.
+NUM_GPUS="${#GPU_ARRAY[@]}"
 
 # Cap GPU count when there are fewer inputs than GPUs
 if [ "$TOTAL_INPUTS" -lt "$NUM_GPUS" ]; then

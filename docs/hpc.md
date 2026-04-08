@@ -122,7 +122,7 @@ export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
     --db_dir $DB_DIR \
     --weights_dir $WEIGHTS_DIR \
     --container $CONTAINER \
-    --num_gpus 4
+    --gpu_devices 0,1,2,3
 ```
 
 With 4 GPUs, all 4 GPUs run MSA search simultaneously in Phase 1. After all MSA jobs complete, the results are re-distributed and all 4 GPUs run inference simultaneously in Phase 2.

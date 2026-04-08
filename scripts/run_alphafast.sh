@@ -11,16 +11,21 @@
 # Handles single-GPU (two-stage) and multi-GPU (producer-consumer) modes.
 #
 # Usage:
+#   # Single GPU (device 0, the default)
 #   ./scripts/run_alphafast.sh \
 #       --input_dir /path/to/inputs \
 #       --output_dir /path/to/outputs \
 #       --db_dir /path/to/databases \
-#       --weights_dir /path/to/weights \
-#       [--num_gpus 1] \
-#       [--container romerolabduke/alphafast:latest] \
-#       [--batch_size auto] \
-#       [--gpu_devices 0,1,...] \
-#       [--backend docker|singularity]
+#       --weights_dir /path/to/weights
+#
+#   # Single GPU on a specific device
+#   ./scripts/run_alphafast.sh ... --gpu_devices 2
+#
+#   # Multi-GPU (2 GPUs)
+#   ./scripts/run_alphafast.sh ... --gpu_devices 0,1
+#
+#   # Multi-GPU on specific devices
+#   ./scripts/run_alphafast.sh ... --gpu_devices 6,7
 
 set -euo pipefail
 
@@ -33,7 +38,7 @@ INPUT_DIR=""
 OUTPUT_DIR=""
 DB_DIR=""
 WEIGHTS_DIR=""
-NUM_GPUS=1
+NUM_GPUS=""
 CONTAINER="romerolabduke/alphafast:latest"
 BATCH_SIZE=""
 GPU_DEVICES=""
@@ -54,12 +59,15 @@ usage() {
     echo "  --weights_dir DIR     Directory containing af3.bin.zst"
     echo ""
     echo "Optional:"
-    echo "  --num_gpus N          Number of GPUs (default: 1)"
+    echo "  --gpu_devices IDS     Comma-separated GPU IDs (default: 0)."
+    echo "                        Single device = single-GPU mode."
+    echo "                        Multiple devices = multi-GPU mode."
+    echo "                        Example: --gpu_devices 0,1 for 2-GPU parallel."
+    echo "  --num_gpus N          Deprecated: use --gpu_devices instead."
+    echo "                        If both given, --gpu_devices takes precedence."
     echo "  --container IMAGE     Container image or .sif path"
     echo "                        (default: romerolabduke/alphafast:latest)"
     echo "  --batch_size N        MSA batch size (default: auto = number of inputs)"
-    echo "  --gpu_devices IDS     Comma-separated GPU IDs (default: 0 for single,"
-    echo "                        0,1,...,N-1 for multi)"
     echo "  --backend TYPE        Force 'docker' or 'singularity' (default: auto-detect)"
     echo "  --rna_mmseqs_db_dir DIR  Use MMseqs2 nucleotide search instead of nhmmer"
     echo "                        for RNA MSA. Requires pre-built databases from"
@@ -144,14 +152,20 @@ if [ -z "$BATCH_SIZE" ]; then
     fi
 fi
 
-# Default GPU devices
+# Resolve GPU devices and count.
+# --gpu_devices is the primary way to specify GPUs. --num_gpus is deprecated
+# but still accepted for backwards compat (generates 0,1,...,N-1).
 if [ -z "$GPU_DEVICES" ]; then
-    if [ "$NUM_GPUS" -eq 1 ]; then
-        GPU_DEVICES="0"
-    else
+    if [ -n "$NUM_GPUS" ] && [ "$NUM_GPUS" -gt 1 ]; then
         GPU_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
+    else
+        GPU_DEVICES="0"
     fi
 fi
+
+# Derive NUM_GPUS from the device list (authoritative source)
+IFS=',' read -r -a _GPU_ARRAY <<< "$GPU_DEVICES"
+NUM_GPUS=${#_GPU_ARRAY[@]}
 
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"

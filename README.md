@@ -134,13 +134,12 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --output_dir /path/to/outputs \
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
-    --num_gpus 4 \
     --gpu_devices 0,1,2,3
 ```
 
 ### How Multi-GPU Mode Works
 
-When `--num_gpus` > 1, AlphaFast runs a **phase-separated parallel pipeline**:
+When multiple devices are specified via `--gpu_devices`, AlphaFast runs a **phase-separated parallel pipeline**:
 
 1. **Partition** — Inputs are distributed round-robin across GPUs. Identical protein sequences are deduplicated within each partition.
 2. **Phase 1: Parallel MSA** — All N GPUs run batched MMseqs2-GPU search simultaneously.
@@ -214,7 +213,7 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
     --container /path/to/alphafast.sif \
-    --num_gpus 4
+    --gpu_devices 0,1,2,3
 ```
 
 ---
@@ -244,10 +243,9 @@ See [docs/modal.md](docs/modal.md) for the full CLI reference, batch processing,
 | `--output_dir` | (required) | Output directory for results |
 | `--db_dir` | (required) | Database directory (from `setup_databases.sh`) |
 | `--weights_dir` | (required) | Directory containing `af3.bin.zst` |
-| `--num_gpus` | `1` | Number of GPUs |
+| `--gpu_devices` | `0` | Comma-separated GPU device IDs. Single device = single-GPU mode, multiple = multi-GPU mode. Example: `--gpu_devices 0,1,2,3` |
 | `--container` | `romerolabduke/alphafast:latest` | Docker image or `.sif` path |
 | `--batch_size` | auto (count of inputs) | MSA batch size |
-| `--gpu_devices` | `0` (single) or `0,1,...` (multi) | Comma-separated GPU device IDs |
 | `--backend` | auto-detect | Force `docker` or `singularity` |
 
 For advanced flags, see [docs/advanced.md](docs/advanced.md).

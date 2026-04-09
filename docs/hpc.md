@@ -5,7 +5,7 @@ This guide covers running AlphaFast on HPC clusters using Singularity/Apptainer 
 ## Prerequisites
 
 - NVIDIA GPU with CUDA compute capability >= 6.0
-- CUDA driver >= 560.28.03 (required for CUDA 12.6 runtime)
+- CUDA driver >= 580.00.00 (required for CUDA 13.0 runtime)
 - Singularity >= 3.7 or Apptainer >= 1.0
 - SLURM workload manager
 
@@ -46,11 +46,11 @@ Singularity requires explicit bind mounts for directories outside the container.
 
 ## CUDA Driver Compatibility
 
-AlphaFast uses CUDA 12.6 inside the container. The host system must have a compatible NVIDIA driver:
+AlphaFast uses CUDA 13.0 inside the container. The host system must have a compatible NVIDIA driver:
 
 | CUDA Version | Minimum Driver |
 |-------------|---------------|
-| CUDA 12.6 | >= 560.28.03 |
+| CUDA 13.0 | >= 580.00.00 |
 
 Check your driver version:
 
@@ -140,7 +140,7 @@ Memory requirements depend on protein size. For sequences longer than 2000 resid
 
 ## Troubleshooting
 
-**Container fails to start with GPU errors**: Verify the CUDA driver version is >= 560.28.03. Run `nvidia-smi` to check.
+**Container fails to start with GPU errors**: Verify the CUDA driver version is >= 580.00.00. Run `nvidia-smi` to check.
 
 **Slow MSA searches**: Set `--temp_dir` to local scratch storage. Network filesystems add significant overhead for the many small I/O operations in MMseqs2.
 

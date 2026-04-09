@@ -7,7 +7,7 @@ This guide covers building AlphaFast from source for development or non-containe
 > **Note:** Building from source is only supported on **Linux**. macOS and Windows are not supported.
 
 - **Python** >= 3.12
-- **CUDA** 12.6 (toolkit and compatible driver >= 560.28.03)
+- **CUDA** 13.0 (toolkit and compatible driver >= 580.00.00)
 - **C++20 compiler**: gcc/g++ >= 10 (for pybind11 C++ extensions)
 - **CMake** >= 3.28
 - **git**
@@ -90,7 +90,7 @@ docker build -f docker/Dockerfile -t romerolabduke/alphafast .
 
 The Dockerfile:
 
-1. Starts from `nvidia/cuda:12.6.3-base-ubuntu24.04`
+1. Starts from `nvidia/cuda:13.0.0-base-ubuntu24.04`
 2. Installs system dependencies (Python 3.12, gcc, g++, git)
 3. Installs UV and creates a virtual environment
 4. Downloads MMseqs2-GPU and Foldseek binaries

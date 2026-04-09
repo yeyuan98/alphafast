@@ -11,9 +11,33 @@
 # Modifications Copyright 2026 Romero Lab, Duke University
 
 # syntax=docker/dockerfile:1
-FROM nvidia/cuda:12.6.3-base-ubuntu24.04
+FROM nvidia/cuda:13.0.0-base-ubuntu24.04
 
 # This Dockerfile uses MMseqs2-GPU for protein MSA searches instead of HMMER.
+
+# Ye addition - remove apt source built-in
+RUN rm /etc/apt/sources.list.d/ubuntu.sources
+
+# Ye addition - changing Ubuntu apt source mirror
+RUN <<'EOF'
+cat > /etc/apt/sources.list << 'SOURCES'
+# 默认注释了源码镜像以提高 apt update 速度，如有需要可自行取消注释
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-updates main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-backports main restricted universe multiverse
+# deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-backports main restricted universe multiverse
+
+# 以下安全更新软件源为官方源配置
+# deb http://security.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse
+# deb-src http://security.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse
+
+# 预发布软件源，不建议启用
+# deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-proposed main restricted universe multiverse
+# # deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-proposed main restricted universe multiverse
+SOURCES
+EOF
 
 # Install system packages
 RUN DEBIAN_FRONTEND=noninteractive \
@@ -24,6 +48,9 @@ RUN DEBIAN_FRONTEND=noninteractive \
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /uvx /bin/
+
+# Ye addition - set uv mirror
+ENV UV_DEFAULT_INDEX="http://mirrors.aliyun.com/pypi/simple/"
 
 # Disable uv bytecode compilation as this hits ulimit on some systems
 ENV UV_COMPILE_BYTECODE=0
@@ -63,6 +90,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --all-groups --no-editable
 
 # Build chemical components database (this binary was installed by uv sync)
+RUN date && hwclock -s || true
 RUN uv run build_data
 
 # To work around a known XLA issue causing the compilation time to greatly

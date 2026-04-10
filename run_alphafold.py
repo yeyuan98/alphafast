@@ -31,8 +31,13 @@ import textwrap
 import time
 import typing
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 from absl import app
 from absl import flags
+import jax
+
+jax.local_devices()
 from alphafold3.common import folding_input
 from alphafold3.common import resources
 from alphafold3.data import pipeline
@@ -41,7 +46,6 @@ from alphafold3.model.inference import make_model_config
 from alphafold3.model.inference import ModelRunner
 from alphafold3.model.inference import process_fold_input
 from alphafold3.model.inference import write_fold_input_json
-import jax
 import tokamax
 
 
@@ -420,9 +424,7 @@ def replace_db_dir(path_with_db_dir: str, db_dirs: Sequence[str]) -> str:
         raise FileNotFoundError(
             f"{path_with_db_dir} with ${{DB_DIR}} not found in any of {db_dirs}."
         )
-    if (
-        sharded_paths := shards.get_sharded_paths(path_with_db_dir)
-    ) is not None:
+    if (sharded_paths := shards.get_sharded_paths(path_with_db_dir)) is not None:
         db_exists = all(os.path.exists(p) for p in sharded_paths)
     else:
         db_exists = os.path.exists(path_with_db_dir)
@@ -433,14 +435,10 @@ def replace_db_dir(path_with_db_dir: str, db_dirs: Sequence[str]) -> str:
 
 def main(_):
     if _JAX_COMPILATION_CACHE_DIR.value is not None:
-        jax.config.update(
-            "jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR.value
-        )
+        jax.config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR.value)
 
     if _JSON_PATH.value is None == _INPUT_DIR.value is None:
-        raise ValueError(
-            "Exactly one of --json_path or --input_dir must be specified."
-        )
+        raise ValueError("Exactly one of --json_path or --input_dir must be specified.")
 
     if not _RUN_INFERENCE.value and not _RUN_DATA_PIPELINE.value:
         raise ValueError(
@@ -482,9 +480,7 @@ def main(_):
                 )
             elif 7.0 <= compute_capability < 8.0:
                 xla_flags = os.environ.get("XLA_FLAGS")
-                required_flag = (
-                    "--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
-                )
+                required_flag = "--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
                 if not xla_flags or required_flag not in xla_flags:
                     raise ValueError(
                         "For devices with GPU compute capability 7.x (see"
@@ -588,9 +584,7 @@ def main(_):
 
             # Process in batches
             for batch_start in range(0, len(expanded_fold_inputs), batch_size):
-                batch_end = min(
-                    batch_start + batch_size, len(expanded_fold_inputs)
-                )
+                batch_end = min(batch_start + batch_size, len(expanded_fold_inputs))
                 batch = expanded_fold_inputs[batch_start:batch_end]
 
                 print(
@@ -609,15 +603,11 @@ def main(_):
                     # Write the processed data JSON
                     write_fold_input_json(processed_input, output_dir)
                     processed_fold_inputs.append((processed_input, output_dir))
-                    print(
-                        f"Fold job {processed_input.name} data pipeline done.\n"
-                    )
+                    print(f"Fold job {processed_input.name} data pipeline done.\n")
         else:
             # Sequential mode: process each fold input individually
             if _BATCH_SIZE.value is None and len(expanded_fold_inputs) > 1:
-                print(
-                    "\nSequential mode: processing fold inputs one at a time"
-                )
+                print("\nSequential mode: processing fold inputs one at a time")
                 print("(Use --batch_size=N to enable batch processing)\n")
 
             for fold_input in expanded_fold_inputs:
@@ -639,9 +629,7 @@ def main(_):
                 )
                 processed_fold_inputs.append((processed_input, output_dir))
 
-        print(
-            f"\nData pipeline completed for {len(processed_fold_inputs)} inputs.\n"
-        )
+        print(f"\nData pipeline completed for {len(processed_fold_inputs)} inputs.\n")
     else:
         # If not running data pipeline, just collect the inputs for inference
         for fold_input in fold_inputs:
@@ -699,9 +687,7 @@ def main(_):
         # Optional timing JSONL file
         timing_path = None
         if _WRITE_TIMING_JSON.value:
-            timing_path = os.path.join(
-                _OUTPUT_DIR.value, "inference_timing.jsonl"
-            )
+            timing_path = os.path.join(_OUTPUT_DIR.value, "inference_timing.jsonl")
 
         # Run inference on all processed inputs
         for processed_input, output_dir in processed_fold_inputs:

@@ -99,6 +99,7 @@ RUN uv run build_data
 # necessary to set the following XLA_FLAGS value instead:
 # ENV XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 # (no need to disable gemm in that case as it is not supported for such GPU).
+ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV XLA_FLAGS="--xla_gpu_enable_triton_gemm=false"
 
 # Memory settings used for folding up to 5,120 tokens on A100 80 GB.

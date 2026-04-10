@@ -145,12 +145,12 @@ def _load_model(
 ):
     """Load the AF3 model once. Returns (model_runner, folding_input_module)."""
     import jax
+
+    jax.local_devices()
     import tokamax
 
     if jax_compilation_cache_dir is not None:
-        jax.config.update(
-            "jax_compilation_cache_dir", jax_compilation_cache_dir
-        )
+        jax.config.update("jax_compilation_cache_dir", jax_compilation_cache_dir)
 
     from alphafold3.model.inference import make_model_config
     from alphafold3.model.inference import ModelRunner
@@ -209,19 +209,26 @@ def main() -> None:
     parser.add_argument("--force_output_dir", action="store_true")
     parser.add_argument("--model_dir", default=None)
     parser.add_argument(
-        "--gpu_device", type=int, default=0,
+        "--gpu_device",
+        type=int,
+        default=0,
         help="GPU device index for inference.",
     )
     parser.add_argument(
-        "--jax_compilation_cache_dir", default=None,
+        "--jax_compilation_cache_dir",
+        default=None,
         help="Directory for JAX compilation cache.",
     )
     parser.add_argument(
-        "--buckets", nargs="*", type=int, default=None,
+        "--buckets",
+        nargs="*",
+        type=int,
+        default=None,
         help="Bucket sizes for padding. If omitted, auto-computed.",
     )
     parser.add_argument(
-        "--legacy_subprocess", action="store_true",
+        "--legacy_subprocess",
+        action="store_true",
         help="Use legacy subprocess mode (reloads model per job).",
     )
     # Legacy flag — only required in subprocess mode.

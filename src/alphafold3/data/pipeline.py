@@ -93,6 +93,43 @@ def _get_protein_templates(
     return protein_templates
 
 
+# Cache to avoid re-running nhmmer for the same sequence in homomers.
+@functools.cache
+def _get_nhmmer_msa(
+    sequence: str,
+    msa_configs: tuple[msa_config.RunConfig, ...],
+    chain_poly_type: str,
+) -> str:
+    """Runs nhmmer search against multiple databases and returns merged A3M.
+
+    Args:
+        sequence: The nucleotide sequence to search.
+        msa_configs: Tuple of RunConfigs for nhmmer databases (tuple for
+            hashability with functools.cache).
+        chain_poly_type: The chain polymer type (e.g. RNA_CHAIN).
+
+    Returns:
+        Merged MSA in A3M format.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _search_db(run_config: msa_config.RunConfig) -> msa.Msa:
+        return msa.get_msa(
+            target_sequence=sequence,
+            run_config=run_config,
+            chain_poly_type=chain_poly_type,
+            deduplicate=False,
+        )
+
+    # Run searches in parallel (CPU-only, no GPU contention)
+    with ThreadPoolExecutor(max_workers=len(msa_configs)) as executor:
+        msas = list(executor.map(_search_db, msa_configs))
+
+    # Merge and deduplicate (order preserved from msa_configs)
+    merged = msa.Msa.from_multiple_msas(msas=msas, deduplicate=True)
+    return merged.to_a3m()
+
+
 # Cache to avoid re-running the MSA tools for the same sequence in homomers.
 @functools.cache
 def _get_protein_msa_and_templates(
@@ -336,6 +373,28 @@ class DataPipelineConfig:
     esmfold_chunk_size: int | None = None
     afdb_cache_dir: str | None = None
 
+    # Nhmmer configuration (for RNA MSA search via HMMER).
+    nhmmer_binary_path: str | None = None
+    hmmalign_binary_path: str | None = None
+    hmmbuild_binary_path: str | None = None
+    rnacentral_database_path: str | None = None
+    rfam_database_path: str | None = None
+    nt_database_path: str | None = None
+    nhmmer_n_cpu: int = 8
+    nhmmer_max_sequences: int = 10_000
+    # Per-database Z-values for sharded databases (megabases, float).
+    # Must be set when searching against sharded databases for correct e-values.
+    rnacentral_z_value: float | None = None
+    rfam_z_value: float | None = None
+    nt_z_value: float | None = None
+    nhmmer_max_parallel_shards: int | None = None
+
+    # MMseqs2 nucleotide search (alternative to nhmmer for RNA/DNA).
+    # When set, uses MMseqs2 --search-type 3 (CPU-only, no GPU for nucleotide)
+    # instead of nhmmer. Requires pre-built MMseqs2 databases from the RNA
+    # FASTA files (via mmseqs createdb).
+    rna_mmseqs_db_dir: str | None = None
+
 
 class DataPipeline:
     """Runs the alignment tools and assembles the input features."""
@@ -500,6 +559,9 @@ class DataPipeline:
         # Set up Foldseek configuration (optional)
         self._foldseek_config = self._setup_foldseek_config(data_pipeline_config)
 
+        # Set up nhmmer configuration (for RNA MSA search)
+        self._setup_nhmmer_config(data_pipeline_config)
+
     def _setup_foldseek_config(
         self, data_pipeline_config: DataPipelineConfig
     ) -> msa_config.FoldseekTemplatesConfig | None:
@@ -602,6 +664,237 @@ class DataPipeline:
             afdb_cache_dir=data_pipeline_config.afdb_cache_dir,
             mode=internal_mode,
         )
+
+    def _setup_nhmmer_config(
+        self, data_pipeline_config: DataPipelineConfig
+    ) -> None:
+        """Sets up nhmmer RunConfigs for RNA MSA search.
+
+        Checks if HMMER binaries are provided. If so, creates RunConfigs for
+        RNA databases (Rfam, RNAcentral, NT-RNA).
+        """
+        nhmmer_bin = data_pipeline_config.nhmmer_binary_path
+        hmmalign_bin = data_pipeline_config.hmmalign_binary_path
+        hmmbuild_bin = data_pipeline_config.hmmbuild_binary_path
+
+        self._nhmmer_enabled = False
+        self._rna_msa_configs: list[msa_config.RunConfig] = []
+        n_cpu = data_pipeline_config.nhmmer_n_cpu
+        max_sequences = data_pipeline_config.nhmmer_max_sequences
+
+        if not (nhmmer_bin and hmmalign_bin and hmmbuild_bin):
+            if any([nhmmer_bin, hmmalign_bin, hmmbuild_bin]):
+                logging.warning(
+                    "Partial HMMER configuration: all three binaries "
+                    "(nhmmer, hmmalign, hmmbuild) are required for RNA "
+                    "MSA search. Missing binaries will disable nhmmer."
+                )
+        else:
+            self._nhmmer_enabled = True
+            max_parallel_shards = data_pipeline_config.nhmmer_max_parallel_shards
+
+            # RNA databases — order matters for merge: Rfam, RNAcentral, NT-RNA
+            # (matches original AF3 merge order)
+            rna_dbs = [
+                ("rfam_rna", data_pipeline_config.rfam_database_path, data_pipeline_config.rfam_z_value),
+                ("rna_central_rna", data_pipeline_config.rnacentral_database_path, data_pipeline_config.rnacentral_z_value),
+                ("nt_rna", data_pipeline_config.nt_database_path, data_pipeline_config.nt_z_value),
+            ]
+            for db_name, db_path, z_value in rna_dbs:
+                if db_path:
+                    self._rna_msa_configs.append(
+                        msa_config.RunConfig(
+                            config=msa_config.NhmmerConfig(
+                                binary_path=nhmmer_bin,
+                                hmmalign_binary_path=hmmalign_bin,
+                                hmmbuild_binary_path=hmmbuild_bin,
+                                database_config=msa_config.DatabaseConfig(
+                                    name=db_name, path=db_path,
+                                ),
+                                n_cpu=n_cpu,
+                                e_value=1e-3,
+                                z_value=z_value,
+                                max_sequences=max_sequences,
+                                alphabet="rna",
+                                max_parallel_shards=max_parallel_shards,
+                            ),
+                            chain_poly_type=mmcif_names.RNA_CHAIN,
+                            crop_size=None,
+                        )
+                    )
+
+        # Check for MMseqs2 nucleotide search as alternative/override.
+        rna_mmseqs_db_dir = data_pipeline_config.rna_mmseqs_db_dir
+        if rna_mmseqs_db_dir:
+            mmseqs_binary = data_pipeline_config.mmseqs_binary_path
+            if not mmseqs_binary:
+                from alphafold3.data.tools import mmseqs as mmseqs_module
+                mmseqs_binary = mmseqs_module.find_mmseqs_binary()
+
+            if mmseqs_binary:
+                logging.info(
+                    "Using MMseqs2 nucleotide search (--search-type 3) "
+                    "instead of nhmmer for RNA MSA."
+                )
+                self._rna_msa_configs = []
+                self._nhmmer_enabled = True  # reuse the same flag
+
+                # MMseqs2 nucleotide search is CPU-only. Use 16 threads per
+                # database to avoid oversubscription — the 3 databases search
+                # in parallel via _get_nhmmer_msa's ThreadPoolExecutor.
+                mmseqs_rna_dbs = [
+                    ("rfam_rna", "rfam"),
+                    ("rna_central_rna", "rnacentral"),
+                    ("nt_rna", "nt_rna"),
+                ]
+                for db_name, db_prefix in mmseqs_rna_dbs:
+                    from alphafold3.data.tools import mmseqs as mmseqs_module
+                    db_path = mmseqs_module.check_mmseqs_database(
+                        rna_mmseqs_db_dir, db_prefix
+                    )
+                    if db_path:
+                        self._rna_msa_configs.append(
+                            msa_config.RunConfig(
+                                config=msa_config.MmseqsConfig(
+                                    binary_path=mmseqs_binary,
+                                    database_config=msa_config.DatabaseConfig(
+                                        name=db_name, path=db_path,
+                                    ),
+                                    e_value=1e-3,
+                                    sensitivity=7.5,
+                                    max_sequences=max_sequences,
+                                    gpu_enabled=False,  # No GPU for nucleotide
+                                    threads=16,
+                                    search_type=3,  # Nucleotide search
+                                ),
+                                chain_poly_type=mmcif_names.RNA_CHAIN,
+                                crop_size=None,
+                            )
+                        )
+                        logging.info(
+                            "Added MMseqs2 nucleotide database: %s (%s)",
+                            db_name, db_path,
+                        )
+
+        if self._rna_msa_configs:
+            logging.info(
+                "RNA MSA search enabled (%d databases)",
+                len(self._rna_msa_configs),
+            )
+
+    def _run_nhmmer_search(
+        self,
+        sequence: str,
+        msa_configs: list[msa_config.RunConfig],
+        chain_poly_type: str,
+    ) -> str:
+        """Runs nhmmer search with caching for identical sequences (homomers)."""
+        # Delegate to cached module-level function. Convert list to tuple for
+        # hashability so functools.cache can memoize by sequence.
+        return _get_nhmmer_msa(
+            sequence=sequence,
+            msa_configs=tuple(msa_configs),
+            chain_poly_type=chain_poly_type,
+        )
+
+    def _run_batched_rna_mmseqs_search(
+        self,
+        unique_rna_seqs: dict[str, str],
+    ) -> dict[str, str]:
+        """Batched RNA MSA search using MMseqs2 nucleotide mode.
+
+        Creates a single queryDB with all RNA sequences, then searches each
+        RNA database once — 3 total searches instead of N×3. Results are
+        merged per-sequence and converted T→U for RNA alphabet.
+
+        Args:
+            unique_rna_seqs: Dict mapping RNA sequence -> chain_id (first seen).
+
+        Returns:
+            Dict mapping RNA sequence -> merged A3M string.
+        """
+        search_start = time.time()
+
+        # Assign stable IDs for queryDB (sequence content → seq_id).
+        seq_to_id: dict[str, str] = {}
+        id_to_seq: dict[str, str] = {}
+        for i, seq in enumerate(unique_rna_seqs.keys()):
+            seq_id = f"rna_{i}"
+            seq_to_id[seq] = seq_id
+            id_to_seq[seq_id] = seq
+
+        sequences_by_id = {seq_to_id[seq]: seq for seq in unique_rna_seqs}
+
+        # Search RNA databases sequentially. Each database is searched with
+        # all unique RNA sequences in one batch. Sequential avoids OOM when
+        # multiple GPU workers each memory-map large databases (nt_rna ~76GB).
+        # The important concurrency is RNA-vs-protein (background thread),
+        # not intra-RNA parallelism.
+        per_db_results: list[mmseqs_batch.BatchSearchResult] = []
+
+        for run_config in self._rna_msa_configs:
+            assert isinstance(run_config.config, msa_config.MmseqsConfig)
+            cfg = run_config.config
+            searcher = mmseqs_batch.MmseqsBatch(
+                binary_path=cfg.binary_path,
+                database_path=cfg.database_config.path,
+                e_value=cfg.e_value,
+                sensitivity=cfg.sensitivity,
+                max_sequences=cfg.max_sequences,
+                gpu_enabled=False,
+                threads=cfg.threads,
+                search_type=cfg.search_type,
+            )
+            logging.info(
+                "Batched RNA search: %d sequences against %s",
+                len(sequences_by_id),
+                cfg.database_config.name,
+            )
+            per_db_results.append(searcher.search_batch(sequences_by_id))
+
+        # Merge per-database results for each sequence (same merge logic as
+        # _get_nhmmer_msa: combine MSAs from all databases, deduplicate).
+        merged_a3m: dict[str, str] = {}
+
+        for seq, seq_id in seq_to_id.items():
+            db_msas = []
+            for db_result in per_db_results:
+                if seq_id in db_result.results:
+                    a3m_str = db_result.results[seq_id].a3m
+                    # Convert T→U for RNA alphabet (MMseqs2 outputs T).
+                    a3m_str = a3m_str.replace("T", "U").replace("t", "u")
+                    # MMseqs2 result2msa may mask the query sequence (X for
+                    # ambiguous). Replace the first sequence with the original
+                    # unmasked query so Msa.from_a3m validation passes.
+                    lines = a3m_str.split("\n")
+                    if len(lines) >= 2 and lines[0].startswith(">"):
+                        lines[1] = seq
+                        a3m_str = "\n".join(lines)
+                    db_msa = msa.Msa.from_a3m(
+                        query_sequence=seq,
+                        chain_poly_type=mmcif_names.RNA_CHAIN,
+                        a3m=a3m_str,
+                    )
+                    db_msas.append(db_msa)
+
+            if db_msas:
+                merged = msa.Msa.from_multiple_msas(
+                    msas=db_msas, deduplicate=True,
+                )
+                merged_a3m[seq] = merged.to_a3m()
+            else:
+                merged_a3m[seq] = f">query\n{seq}\n"
+
+        elapsed = time.time() - search_start
+        logging.info(
+            "Batched RNA MMseqs2 search completed: %d sequences x %d databases "
+            "in %.2f seconds",
+            len(unique_rna_seqs),
+            len(self._rna_msa_configs),
+            elapsed,
+        )
+
+        return merged_a3m
 
     def _setup_mmseqs_config(
         self, data_pipeline_config: DataPipelineConfig
@@ -954,20 +1247,26 @@ class DataPipeline:
     ) -> folding_input.RnaChain:
         """Processes a single RNA chain.
 
-        Note: RNA MSA search (via Nhmmer) is not supported in AlphaFast.
-        RNA chains will use an empty MSA or any pre-provided MSA.
+        Uses nhmmer for RNA MSA search if HMMER is configured. Otherwise
+        falls back to empty MSA or any pre-provided MSA.
         """
         if chain.unpaired_msa is not None:
             logging.info(
                 "Using provided MSA for RNA chain %s.", chain.id,
             )
-            empty_msa = msa.Msa.from_empty(
-                query_sequence=chain.sequence, chain_poly_type=mmcif_names.RNA_CHAIN
-            ).to_a3m()
-            unpaired_msa = chain.unpaired_msa or empty_msa
+            unpaired_msa = chain.unpaired_msa
+        elif self._nhmmer_enabled and self._rna_msa_configs:
+            logging.info(
+                "Running nhmmer RNA MSA search for chain %s.", chain.id,
+            )
+            unpaired_msa = self._run_nhmmer_search(
+                sequence=chain.sequence,
+                msa_configs=self._rna_msa_configs,
+                chain_poly_type=mmcif_names.RNA_CHAIN,
+            )
         else:
             logging.warning(
-                "RNA MSA search is not supported in AlphaFast (requires HMMER). "
+                "RNA MSA search is not configured (requires HMMER). "
                 "Using empty MSA for RNA chain %s.", chain.id,
             )
             unpaired_msa = msa.Msa.from_empty(
@@ -981,25 +1280,88 @@ class DataPipeline:
         )
 
     def process(self, fold_input: folding_input.Input) -> folding_input.Input:
-        """Runs MSA and template tools and returns a new Input with the results."""
-        processed_chains = []
-        for chain in fold_input.chains:
-            logging.info("Running data pipeline for chain %s...", chain.id)
-            process_chain_start_time = time.time()
-            match chain:
-                case folding_input.ProteinChain():
-                    processed_chains.append(self.process_protein_chain(chain))
-                case folding_input.RnaChain():
-                    processed_chains.append(self.process_rna_chain(chain))
-                case _:
-                    processed_chains.append(chain)
+        """Runs MSA and template tools and returns a new Input with the results.
+
+        RNA/DNA nhmmer searches (CPU-only) run concurrently with protein
+        MMseqs2-GPU searches so that CPU and GPU work is overlapped.
+        """
+        process_start = time.time()
+
+        # Separate chains by type so we can pipeline CPU and GPU work.
+        rna_chains: list[tuple[int, folding_input.RnaChain]] = []
+        protein_indices: list[int] = []
+        other_indices: list[int] = []
+
+        for idx, chain in enumerate(fold_input.chains):
+            if isinstance(chain, folding_input.RnaChain):
+                rna_chains.append((idx, chain))
+            elif isinstance(chain, folding_input.ProteinChain):
+                protein_indices.append(idx)
+            else:
+                other_indices.append(idx)
+
+        # Launch ALL RNA chain processing in a background thread (CPU-only)
+        # so it runs concurrently with protein GPU searches below.
+        # This applies whether RNA search is configured (nhmmer/MMseqs2
+        # nucleotide) or not (empty MSA) — either way, we don't want
+        # RNA processing to block the GPU protein search path.
+        rna_futures: dict[int, futures.Future[folding_input.RnaChain]] = {}
+        rna_executor = None
+
+        if rna_chains:
+            rna_executor = futures.ThreadPoolExecutor(max_workers=1)
+            for idx, chain in rna_chains:
+                logging.info(
+                    "Submitting RNA chain %s to background processing...",
+                    chain.id,
+                )
+                rna_futures[idx] = rna_executor.submit(
+                    self.process_rna_chain, chain,
+                )
+
+        # Process protein chains (GPU-bound, runs while RNA threads work).
+        processed_chains: dict[int, folding_input.Chain] = {}
+        for idx in protein_indices:
+            chain = fold_input.chains[idx]
+            logging.info("Running data pipeline for protein chain %s...", chain.id)
+            chain_start = time.time()
+            processed_chains[idx] = self.process_protein_chain(chain)
             logging.info(
                 "Running data pipeline for chain %s took %.2f seconds",
                 chain.id,
-                time.time() - process_chain_start_time,
+                time.time() - chain_start,
             )
 
-        return dataclasses.replace(fold_input, chains=processed_chains)
+        # Collect RNA results (should already be done or nearly done).
+        for idx, chain in rna_chains:
+            chain_start = time.time()
+            processed_chains[idx] = rna_futures[idx].result()
+            logging.info(
+                "RNA chain %s completed in %.2f seconds",
+                chain.id,
+                time.time() - chain_start,
+            )
+
+        if rna_executor is not None:
+            rna_executor.shutdown(wait=False)
+
+        # Other chains (DNA, ligands, etc.) pass through unchanged.
+        for idx in other_indices:
+            chain = fold_input.chains[idx]
+            if isinstance(chain, folding_input.DnaChain):
+                logging.info(
+                    "DNA chain %s: using empty MSA (no search), matching "
+                    "AlphaFold 3 behavior.", chain.id,
+                )
+            processed_chains[idx] = chain
+
+        # Reassemble in original chain order.
+        ordered_chains = [processed_chains[i] for i in range(len(fold_input.chains))]
+
+        logging.info(
+            "process() completed in %.2f seconds", time.time() - process_start,
+        )
+        return dataclasses.replace(fold_input, chains=ordered_chains)
 
     def process_batch(
         self, fold_inputs: Sequence[folding_input.Input]
@@ -1062,6 +1424,68 @@ class DataPipeline:
             len(all_sequences),
             len(fold_inputs),
         )
+
+        # Step 1b: Launch RNA searches in a background thread, concurrent
+        # with the protein GPU batch below.
+        # - MMseqs nucleotide mode: batched (single queryDB, 3 DB searches)
+        # - nhmmer mode: per-sequence (nhmmer doesn't support multi-query)
+        rna_nhmmer_futures: dict[str, futures.Future[str]] = {}
+        rna_batch_future: futures.Future[dict[str, str]] | None = None
+        rna_executor = None
+
+        if self._nhmmer_enabled and self._rna_msa_configs:
+            # Collect unique RNA sequences across all fold inputs.
+            unique_rna_seqs: dict[str, str] = {}  # sequence -> chain_id (first seen)
+            for fold_input in fold_inputs:
+                for chain in fold_input.chains:
+                    if (
+                        isinstance(chain, folding_input.RnaChain)
+                        and chain.unpaired_msa is None
+                        and chain.sequence not in unique_rna_seqs
+                    ):
+                        unique_rna_seqs[chain.sequence] = chain.id
+
+            if unique_rna_seqs:
+                rna_executor = futures.ThreadPoolExecutor(max_workers=1)
+
+                # Check if using MMseqs nucleotide (supports batching) or
+                # nhmmer (per-sequence only).
+                is_mmseqs_rna = isinstance(
+                    self._rna_msa_configs[0].config, msa_config.MmseqsConfig
+                )
+
+                if is_mmseqs_rna:
+                    # Batched: single queryDB, search 3 databases once each.
+                    logging.info(
+                        "Launching batched RNA MMseqs2 search for %d unique "
+                        "sequences across %d databases in background...",
+                        len(unique_rna_seqs),
+                        len(self._rna_msa_configs),
+                    )
+                    rna_batch_future = rna_executor.submit(
+                        self._run_batched_rna_mmseqs_search,
+                        unique_rna_seqs=unique_rna_seqs,
+                    )
+                else:
+                    # nhmmer: per-sequence, sequential in background.
+                    logging.info(
+                        "Launching %d RNA nhmmer searches sequentially in "
+                        "background (concurrent with protein GPU batch)...",
+                        len(unique_rna_seqs),
+                    )
+                    for seq, chain_id in unique_rna_seqs.items():
+                        logging.info(
+                            "Submitting RNA sequence (chain %s, len %d) to "
+                            "background search...",
+                            chain_id,
+                            len(seq),
+                        )
+                        rna_nhmmer_futures[seq] = rna_executor.submit(
+                            self._run_nhmmer_search,
+                            sequence=seq,
+                            msa_configs=self._rna_msa_configs,
+                            chain_poly_type=mmcif_names.RNA_CHAIN,
+                        )
 
         # Step 2: Run batch MSA search using MmseqsMultiDBBatch
         mmseqs_cfg = self._uniref90_msa_config.config
@@ -1153,6 +1577,17 @@ class DataPipeline:
         # Step 4: Create mapping from sequence content to seq_id
         seq_content_to_id = {seq: seq_id for seq_id, seq in all_sequences.items()}
 
+        # Collect batched RNA results if applicable.
+        if rna_batch_future is not None:
+            rna_batch_results = rna_batch_future.result()
+            # Convert batch results dict to the same format as per-seq futures
+            # so the chain assembly code below works uniformly.
+            for seq, a3m in rna_batch_results.items():
+                # Wrap in a resolved future for uniform access.
+                f: futures.Future[str] = futures.Future()
+                f.set_result(a3m)
+                rna_nhmmer_futures[seq] = f
+
         # Step 5: Process each fold input, distributing MSA results
         processed_fold_inputs = []
 
@@ -1227,8 +1662,22 @@ class DataPipeline:
                     processed_chains.append(processed_chain)
 
                 elif isinstance(chain, folding_input.RnaChain):
-                    # RNA chains use Nhmmer, process sequentially
-                    processed_chains.append(self.process_rna_chain(chain))
+                    # Use pre-computed nhmmer result if available.
+                    if chain.unpaired_msa is not None:
+                        processed_chains.append(chain)
+                    elif chain.sequence in rna_nhmmer_futures:
+                        unpaired_msa = rna_nhmmer_futures[chain.sequence].result()
+                        processed_chains.append(
+                            folding_input.RnaChain(
+                                id=chain.id,
+                                sequence=chain.sequence,
+                                modifications=chain.modifications,
+                                unpaired_msa=unpaired_msa,
+                            )
+                        )
+                    else:
+                        # Fallback: nhmmer not enabled or not launched
+                        processed_chains.append(self.process_rna_chain(chain))
                 else:
                     # Other chain types pass through
                     processed_chains.append(chain)
@@ -1242,6 +1691,9 @@ class DataPipeline:
             processed_fold_inputs.append(
                 dataclasses.replace(fold_input, chains=processed_chains)
             )
+
+        if rna_executor is not None:
+            rna_executor.shutdown(wait=False)
 
         total_time = time.time() - batch_start_time
         logging.info(

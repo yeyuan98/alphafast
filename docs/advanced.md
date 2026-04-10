@@ -33,7 +33,7 @@ Controls the fraction of GPU memory JAX pre-allocates. The default of 0.95 is op
 
 ## Multi-GPU Phase-Separated Parallel
 
-When `--num_gpus > 1`, AlphaFast uses a **phase-separated parallel** architecture orchestrated by `scripts/run_multigpu.sh`:
+When multiple GPU devices are specified via `--gpu_devices` (e.g. `--gpu_devices 0,1,2,3`), AlphaFast uses a **phase-separated parallel** architecture orchestrated by `scripts/run_multigpu.sh`:
 
 1. **Partition** — Inputs are distributed round-robin across all N GPUs.
 2. **Phase 1: Parallel MSA** — All N GPUs run `run_data_pipeline.py` simultaneously, each processing its partition with batched MMseqs2-GPU search.

@@ -16,7 +16,7 @@ Also check out the MMSeqs2-GPU paper [here](https://www.nature.com/articles/s415
 > [Google DeepMind's Terms of Use](WEIGHTS_TERMS_OF_USE.md).
 > You must apply for and receive weights directly from Google. This is not an officially supported Google product.
 >
-> **Note**: DNA/RNA MSA search is not currently supported, but we are rapidly working on this.
+> **Note**: Protein MSA uses MMseqs2-GPU. RNA MSA uses `mmseqs_rna` by default when present, and can optionally fall back to nhmmer via RNA FASTA databases. DNA chains use empty MSA, matching AlphaFold 3's native behavior.
 >
 ## Quick Start
 
@@ -40,14 +40,27 @@ business days. You will receive a file of compressed weights named `af3.bin.zst`
 
 ### Step 3: Download and Convert Databases
 
-Downloads and converts protein sequence databases to MMseqs2 GPU format.
+Downloads AlphaFast databases. By default this installs pre-built protein MMseqs2, RNA MMseqs2, and mmCIF data from HuggingFace.
 
-> **Important:** Point `path/to/databases` to a fast data drive (NVMe recommended). You will need a minimum of **800 GB** free disk space (250 GB download + 540 GB MMseqs2 padded databases).
+> **Important:** Point `path/to/databases` to a fast data drive (NVMe recommended). The default pre-built install includes protein MMseqs2, RNA MMseqs2, and mmCIF data. Add `--include-nhmmer` only if you want RNA FASTA fallback files for forced `--use_nhmmer` runs. Use `--from-source` only for advanced rebuild workflows.
 >
-> **Prerequisite:** The `mmseqs` binary (GPU version), `wget`, `zstd`, and `tar` must be installed and in your `PATH` before running this script. See [docs/building.md](docs/building.md) for MMseqs2 installation instructions.
+> **Prerequisite:** Pre-built mode requires `hf`, `zstd`, and `tar`. `--from-source` additionally requires `wget` and `mmseqs`. See [docs/building.md](docs/building.md) for MMseqs2 installation instructions.
 
 ```bash
+# Default: protein + RNA MMseqs + mmCIF from HuggingFace
 ./scripts/setup_databases.sh /path/to/databases
+
+# Add RNA FASTA fallback files for forced nhmmer runs
+./scripts/setup_databases.sh /path/to/databases --include-nhmmer
+
+# Protein-only pre-built install
+./scripts/setup_databases.sh /path/to/databases --protein-only
+
+# RNA-only pre-built install
+./scripts/setup_databases.sh /path/to/databases --rna-only
+
+# Build from Google-hosted source data instead of using pre-built artifacts
+./scripts/setup_databases.sh /path/to/databases --from-source
 ```
 
 **Alternatively**, download pre-built databases from HuggingFace (no padded conversion necessary):
@@ -97,6 +110,31 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
 }
 ```
 
+**RNA-Protein Complex:**
+
+```json
+{
+  "name": "rna_protein",
+  "sequences": [
+    {
+      "protein": {
+        "id": ["A"],
+        "sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSH"
+      }
+    },
+    {
+      "rna": {
+        "id": ["B"],
+        "sequence": "GGGGACUGCGUUCGCGCUUUCCCC"
+      }
+    }
+  ],
+  "modelSeeds": [1],
+  "dialect": "alphafold3",
+  "version": 3
+}
+```
+
 ### Step 7: Run Inference
 
 > **Note:** Performance gains from AlphaFast scale from: input batch size, GPU compute capability/VRAM, and number of GPUs.
@@ -119,13 +157,25 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --output_dir /path/to/outputs \
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
-    --num_gpus 4 \
     --gpu_devices 0,1,2,3
 ```
 
+**Force nhmmer for RNA:**
+
+```bash
+./scripts/run_alphafast.sh \
+    --input_dir /path/to/inputs \
+    --output_dir /path/to/outputs \
+    --db_dir /path/to/databases \
+    --weights_dir /path/to/weights \
+    --use_nhmmer
+```
+
+This requires RNA FASTA fallback files to be present, e.g. from `./scripts/setup_databases.sh /path/to/databases --include-nhmmer`.
+
 ### How Multi-GPU Mode Works
 
-When `--num_gpus` > 1, AlphaFast runs a **phase-separated parallel pipeline**:
+When multiple devices are specified via `--gpu_devices`, AlphaFast runs a **phase-separated parallel pipeline**:
 
 1. **Partition** — Inputs are distributed round-robin across GPUs. Identical protein sequences are deduplicated within each partition.
 2. **Phase 1: Parallel MSA** — All N GPUs run batched MMseqs2-GPU search simultaneously.
@@ -139,7 +189,7 @@ At large batch sizes, every GPU is 100% utilized in each phase, achieving near-l
 
 ### Step 3: Install Databases
 >
-> **Important:** Point `path/to/databases` to a high speed volume with fast network transfer. You will need a minimum of **800 GB** free disk space on this partition (250 GB download + 540 GB MMseqs2 padded databases). AlphaFast will spend roughly ~1 hour to copy the databases to a local NVMe volume (often called `/scratch` on HPC systems). If this is not available, then make sure the databases are on the fastest I/O partition possible.
+> **Important:** Point `path/to/databases` to a high speed volume with fast network transfer. The default `setup_databases.sh` mode downloads pre-built protein MMseqs2, RNA MMseqs2, and mmCIF data from HuggingFace. Add `--include-nhmmer` only if you also want RNA FASTA fallback files. AlphaFast will spend roughly ~1 hour to copy the databases to a local NVMe volume (often called `/scratch` on HPC systems). If this is not available, then make sure the databases are on the fastest I/O partition possible.
 > **Note:** You may need to edit the SLURM directives to match your university's specific HPC formatting.
 
 ```bash
@@ -148,6 +198,9 @@ sbatch scripts/setup_databases.sbatch /path/to/databases
 
 # Or run directly in an interactive session:
 ./scripts/setup_databases.sh /path/to/databases
+
+# Optional: include RNA FASTA fallback for forced nhmmer runs
+sbatch scripts/setup_databases.sbatch /path/to/databases --include-nhmmer
 ```
 
 **Alternatively**, download pre-built databases from HuggingFace (no padded conversion necessary):
@@ -209,7 +262,7 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
     --container /path/to/alphafast.sif \
-    --num_gpus 4
+    --gpu_devices 0,1,2,3
 ```
 
 ---
@@ -220,12 +273,24 @@ Modal provides serverless GPU inference with pay-per-second billing.
 
 ```bash
 pip install modal && modal token new
+
+# Recommended for HuggingFace-backed database downloads on Modal
+modal secret create huggingface HF_TOKEN=hf_your_token_here
+
 modal run modal/upload_weights.py --file /path/to/af3.bin.zst --no-extract
-modal run modal/prepare_databases.py --from-prebuilt   # ~1 hour, downloads pre-built DBs from HuggingFace
+modal run modal/prepare_databases.py
+
+# Optional: include RNA FASTA fallback for nhmmer
+modal run modal/prepare_databases.py --include-nhmmer
+
+# Advanced: build on Modal from Google-hosted source data
+modal run modal/prepare_databases.py --from-source
 
 # Run predictions
 modal run modal/af3_predict.py --input protein.json
 ```
+
+`modal/prepare_databases.py` expects a Modal secret named `huggingface` containing `HF_TOKEN`, and passes it through to Hugging Face for authenticated downloads with higher rate limits.
 
 See [docs/modal.md](docs/modal.md) for the full CLI reference, batch processing, multi-GPU modes, and cost estimates.
 
@@ -239,10 +304,9 @@ See [docs/modal.md](docs/modal.md) for the full CLI reference, batch processing,
 | `--output_dir` | (required) | Output directory for results |
 | `--db_dir` | (required) | Database directory (from `setup_databases.sh`) |
 | `--weights_dir` | (required) | Directory containing `af3.bin.zst` |
-| `--num_gpus` | `1` | Number of GPUs |
+| `--gpu_devices` | `0` | Comma-separated GPU device IDs. Single device = single-GPU mode, multiple = multi-GPU mode. Example: `--gpu_devices 0,1,2,3` |
 | `--container` | `romerolabduke/alphafast:latest` | Docker image or `.sif` path |
 | `--batch_size` | auto (count of inputs) | MSA batch size |
-| `--gpu_devices` | `0` (single) or `0,1,...` (multi) | Comma-separated GPU device IDs |
 | `--backend` | auto-detect | Force `docker` or `singularity` |
 
 For advanced flags, see [docs/advanced.md](docs/advanced.md).

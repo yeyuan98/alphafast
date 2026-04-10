@@ -8,19 +8,24 @@
 # Universal AlphaFast run script.
 #
 # Supports Docker and Singularity backends with automatic detection.
-# Handles single-GPU (two-stage) and multi-GPU (producer-consumer) modes.
+# Handles single-GPU and phase-separated multi-GPU modes.
 #
 # Usage:
+#   # Single GPU (device 0, the default)
 #   ./scripts/run_alphafast.sh \
 #       --input_dir /path/to/inputs \
 #       --output_dir /path/to/outputs \
 #       --db_dir /path/to/databases \
-#       --weights_dir /path/to/weights \
-#       [--num_gpus 1] \
-#       [--container romerolabduke/alphafast:latest] \
-#       [--batch_size auto] \
-#       [--gpu_devices 0,1,...] \
-#       [--backend docker|singularity]
+#       --weights_dir /path/to/weights
+#
+#   # Single GPU on a specific device
+#   ./scripts/run_alphafast.sh ... --gpu_devices 2
+#
+#   # Multi-GPU (2 GPUs)
+#   ./scripts/run_alphafast.sh ... --gpu_devices 0,1
+#
+#   # Multi-GPU on specific devices
+#   ./scripts/run_alphafast.sh ... --gpu_devices 6,7
 
 set -euo pipefail
 
@@ -33,11 +38,13 @@ INPUT_DIR=""
 OUTPUT_DIR=""
 DB_DIR=""
 WEIGHTS_DIR=""
-NUM_GPUS=1
+NUM_GPUS=""
 CONTAINER="romerolabduke/alphafast:latest"
 BATCH_SIZE=""
 GPU_DEVICES=""
 BACKEND=""
+RNA_MMSEQS_DB_DIR=""
+USE_NHMMER=""
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -52,13 +59,22 @@ usage() {
     echo "  --weights_dir DIR     Directory containing af3.bin.zst"
     echo ""
     echo "Optional:"
-    echo "  --num_gpus N          Number of GPUs (default: 1)"
+    echo "  --gpu_devices IDS     Comma-separated GPU IDs (default: 0)."
+    echo "                        Single device = single-GPU mode."
+    echo "                        Multiple devices = multi-GPU mode."
+    echo "                        Example: --gpu_devices 0,1 for 2-GPU parallel."
+    echo "  --num_gpus N          Deprecated: use --gpu_devices instead."
+    echo "                        If both given, --gpu_devices takes precedence."
     echo "  --container IMAGE     Container image or .sif path"
     echo "                        (default: romerolabduke/alphafast:latest)"
     echo "  --batch_size N        MSA batch size (default: auto = number of inputs)"
-    echo "  --gpu_devices IDS     Comma-separated GPU IDs (default: 0 for single,"
-    echo "                        0,1,...,N-1 for multi)"
     echo "  --backend TYPE        Force 'docker' or 'singularity' (default: auto-detect)"
+    echo "  --rna_mmseqs_db_dir DIR  Override RNA MMseqs2 database directory."
+    echo "                        By default, AlphaFast auto-detects <db_dir>/mmseqs_rna"
+    echo "                        and uses MMseqs2 nucleotide search for RNA MSA."
+    echo "  --use_nhmmer          Force nhmmer for RNA MSA search instead of RNA MMseqs2."
+    echo "                        Requires RNA FASTA fallback files, e.g. created with"
+    echo "                        setup_databases.sh --include-nhmmer."
     exit 1
 }
 
@@ -73,6 +89,8 @@ while [ "$#" -gt 0 ]; do
         --batch_size)   BATCH_SIZE="$2"; shift 2 ;;
         --gpu_devices)  GPU_DEVICES="$2"; shift 2 ;;
         --backend)      BACKEND="$2"; shift 2 ;;
+        --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
+        --use_nhmmer)   USE_NHMMER="true"; shift ;;
         --help|-h)      usage ;;
         *)              echo "Unknown argument: $1"; usage ;;
     esac
@@ -135,14 +153,20 @@ if [ -z "$BATCH_SIZE" ]; then
     fi
 fi
 
-# Default GPU devices
+# Resolve GPU devices and count.
+# --gpu_devices is the primary way to specify GPUs. --num_gpus is deprecated
+# but still accepted for backwards compat (generates 0,1,...,N-1).
 if [ -z "$GPU_DEVICES" ]; then
-    if [ "$NUM_GPUS" -eq 1 ]; then
-        GPU_DEVICES="0"
-    else
+    if [ -n "$NUM_GPUS" ] && [ "$NUM_GPUS" -gt 1 ]; then
         GPU_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
+    else
+        GPU_DEVICES="0"
     fi
 fi
+
+# Derive NUM_GPUS from the device list (authoritative source)
+IFS=',' read -r -a _GPU_ARRAY <<< "$GPU_DEVICES"
+NUM_GPUS=${#_GPU_ARRAY[@]}
 
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
@@ -171,6 +195,14 @@ run_container() {
     local gpu_spec="$1"
     shift
 
+    # Optional RNA MMseqs2 database mount
+    local rna_mount_docker=""
+    local rna_mount_singularity=""
+    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        rna_mount_docker="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        rna_mount_singularity="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+    fi
+
     if [ "$BACKEND" = "docker" ]; then
         docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -180,6 +212,7 @@ run_container() {
             -v "${WEIGHTS_DIR}:/data/models" \
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${OUTPUT_DIR}:/data/af_output" \
+            $rna_mount_docker \
             "$CONTAINER" \
             "$@"
     elif [ "$BACKEND" = "singularity" ]; then
@@ -190,6 +223,7 @@ run_container() {
             --bind "${WEIGHTS_DIR}:/data/models" \
             --bind "${INPUT_DIR}:/data/af_input" \
             --bind "${OUTPUT_DIR}:/data/af_output" \
+            $rna_mount_singularity \
             "$CONTAINER" \
             "$@"
     fi
@@ -210,6 +244,23 @@ if [ "$NUM_GPUS" -eq 1 ]; then
     echo "Log: $PIPELINE_LOG"
     echo ""
 
+    # Build RNA search flags:
+    # 1. If --use_nhmmer is set, force nhmmer mode
+    # 2. If --rna_mmseqs_db_dir is explicitly set, use that
+    # 3. Auto-detect <db_dir>/mmseqs_rna/ for MMseqs2 nucleotide search
+    # 4. Fall back to nhmmer if no MMseqs2 RNA databases found
+    RNA_FLAGS=""
+    if [ -n "$USE_NHMMER" ]; then
+        RNA_FLAGS="--use_nhmmer --nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
+    elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        RNA_FLAGS="--rna_mmseqs_db_dir=/data/rna_mmseqs_databases"
+    elif [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        echo "Auto-detected RNA MMseqs2 databases at ${DB_DIR}/mmseqs_rna"
+        RNA_FLAGS="--rna_mmseqs_db_dir=/data/public_databases/mmseqs_rna"
+    else
+        RNA_FLAGS="--nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
+    fi
+
     run_container "$GPU_ID" \
         python /app/alphafold/run_data_pipeline.py \
         --input_dir=/data/af_input \
@@ -218,6 +269,7 @@ if [ "$NUM_GPUS" -eq 1 ]; then
         --mmseqs_db_dir=/data/mmseqs_databases \
         --use_mmseqs_gpu \
         --batch_size="$BATCH_SIZE" \
+        $RNA_FLAGS \
         2>&1 | tee "$PIPELINE_LOG"
 
     # Stage 2: Inference (loop over data JSONs)
@@ -245,23 +297,52 @@ else
     MSA_OUTPUT_DIR="${OUTPUT_DIR}/msa_output"
     mkdir -p "$MSA_OUTPUT_DIR"
 
+    # Determine RNA MMseqs2 DB path for multi-GPU container.
+    # run_multigpu.sh reads RNA_MMSEQS_DB_DIR from environment.
+    MULTIGPU_RNA_DB_DIR=""
+    if [ -n "$USE_NHMMER" ]; then
+        : # No RNA MMseqs2 DB — nhmmer will be used by run_data_pipeline.py via --use_nhmmer
+    elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        MULTIGPU_RNA_DB_DIR="/data/rna_mmseqs_databases"
+    elif [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        MULTIGPU_RNA_DB_DIR="/data/public_databases/mmseqs_rna"
+    fi
+
+    # Optional RNA MMseqs2 mount
+    RNA_DOCKER_MOUNT=""
+    RNA_SINGULARITY_BIND=""
+    if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+        RNA_DOCKER_MOUNT="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        RNA_SINGULARITY_BIND="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+    fi
+
+    # Inside the container, CUDA_VISIBLE_DEVICES remaps physical device IDs
+    # (e.g. 6,7) to logical indices (0,1). Pass logical indices to
+    # run_multigpu.sh so map_visible_gpu() works correctly.
+    LOGICAL_GPU_LIST=$(seq -s, 0 $((NUM_GPUS - 1)))
+
     if [ "$BACKEND" = "docker" ]; then
         docker run --rm \
             --user "$(id -u):$(id -g)" \
             --gpus all \
             -e CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+            -e RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
+            -e USE_NHMMER="${USE_NHMMER}" \
             -v "${DB_DIR}:/data/public_databases" \
             -v "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
             -v "${WEIGHTS_DIR}:/data/models" \
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
             -v "${OUTPUT_DIR}:/data/af_output" \
+            $RNA_DOCKER_MOUNT \
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
-                $NUM_GPUS $BATCH_SIZE $GPU_DEVICES"
+                $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     elif [ "$BACKEND" = "singularity" ]; then
         SINGULARITYENV_CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+        SINGULARITYENV_RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
+        SINGULARITYENV_USE_NHMMER="${USE_NHMMER}" \
         singularity exec --nv \
             --bind "${DB_DIR}:/data/public_databases" \
             --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
@@ -269,10 +350,11 @@ else
             --bind "${INPUT_DIR}:/data/af_input" \
             --bind "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
             --bind "${OUTPUT_DIR}:/data/af_output" \
+            $RNA_SINGULARITY_BIND \
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
-                $NUM_GPUS $BATCH_SIZE $GPU_DEVICES"
+                $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     fi
 fi
 

@@ -4,21 +4,11 @@
 # a derivative work of AlphaFold 3 by DeepMind Technologies Limited.
 # https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-"""
-Prepare AlphaFold3 databases on Modal.
+"""Prepare AlphaFold3 databases on Modal.
 
-Downloads databases from Google Cloud Storage directly to Modal volume,
-then converts to MMseqs2 GPU-padded format.
-
-Usage:
-    # Full setup (download + convert)
-    modal run modal/prepare_databases.py
-
-    # Check current status
-    modal run modal/prepare_databases.py --status
-
-    # Only run MMseqs2 conversion (if raw databases exist)
-    modal run modal/prepare_databases.py --convert-only
+Default mode downloads pre-built protein and RNA MMseqs databases from
+HuggingFace. Use ``--from-source`` to download raw FASTA files from Google
+Cloud Storage and build the selected databases on Modal.
 """
 
 import modal
@@ -37,22 +27,21 @@ DATABASE_SOURCE_URL = "https://storage.googleapis.com/alphafold-databases/v3.0"
 DATABASE_VOLUME_NAME = "af3-databases"
 DATABASE_MOUNT_PATH = "/databases"
 
-# Database files to download
-# Format: (filename, download_type) where download_type is "tar" or "zstd"
-DATABASE_FILES = [
-    # PDB mmCIF files (large, downloads as tar)
-    ("pdb_2022_09_28_mmcif_files.tar.zst", "tar"),
-    # Protein sequence databases
-    ("mgy_clusters_2022_05.fa.zst", "zstd"),
-    ("bfd-first_non_consensus_sequences.fasta.zst", "zstd"),
-    ("uniref90_2022_05.fa.zst", "zstd"),
-    ("uniprot_all_2021_04.fa.zst", "zstd"),
-    ("pdb_seqres_2022_09_28.fasta.zst", "zstd"),
-    # RNA databases
-    ("rnacentral_active_seq_id_90_cov_80_linclust.fasta.zst", "zstd"),
-    ("nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta.zst", "zstd"),
-    ("rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta.zst", "zstd"),
-]
+MMCIF_ARCHIVE = "pdb_2022_09_28_mmcif_files.tar.zst"
+
+PROTEIN_FASTA_FILES = {
+    "mgy_clusters_2022_05.fa.zst": "mgy_clusters_2022_05.fa",
+    "bfd-first_non_consensus_sequences.fasta.zst": "bfd-first_non_consensus_sequences.fasta",
+    "uniref90_2022_05.fa.zst": "uniref90_2022_05.fa",
+    "uniprot_all_2021_04.fa.zst": "uniprot_all_2021_04.fa",
+    "pdb_seqres_2022_09_28.fasta.zst": "pdb_seqres_2022_09_28.fasta",
+}
+
+RNA_FASTA_FILES = {
+    "rnacentral_active_seq_id_90_cov_80_linclust.fasta.zst": "rnacentral_active_seq_id_90_cov_80_linclust.fasta",
+    "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta.zst": "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
+    "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta.zst": "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
+}
 
 # MMseqs2 databases to create (target_name -> source_fasta)
 MMSEQS_DATABASES = {
@@ -62,6 +51,29 @@ MMSEQS_DATABASES = {
     "uniprot": "uniprot_all_2021_04.fa",
     "pdb_seqres": "pdb_seqres_2022_09_28.fasta",
 }
+
+RNA_MMSEQS_DATABASES = {
+    "rfam": "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
+    "rnacentral": "rnacentral_active_seq_id_90_cov_80_linclust.fasta",
+    "nt_rna": "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
+}
+
+
+def resolve_modes(protein_only: bool, rna_only: bool, include_nhmmer: bool) -> dict[str, bool]:
+    if protein_only and rna_only:
+        raise ValueError("--protein-only and --rna-only are mutually exclusive")
+
+    download_protein = not rna_only
+    download_rna_mmseqs = not protein_only
+    keep_rna_fasta = include_nhmmer
+    download_rna_fastas = download_rna_mmseqs or keep_rna_fasta
+
+    return {
+        "download_protein": download_protein,
+        "download_rna_mmseqs": download_rna_mmseqs,
+        "download_rna_fastas": download_rna_fastas,
+        "keep_rna_fasta": keep_rna_fasta,
+    }
 
 # =============================================================================
 # MODAL APP SETUP
@@ -113,7 +125,7 @@ hf_image = (
     cpu=4,
     memory=16384,  # 16GB RAM
 )
-def download_from_hf():
+def download_from_hf(download_protein: bool, download_rna_mmseqs: bool, include_nhmmer: bool):
     """
     Download pre-built AlphaFold3 databases from HuggingFace Hub.
 
@@ -170,24 +182,29 @@ def download_from_hf():
     print(f"Found {len(repo_files)} files in repository")
     print()
 
-        # Keep only the repo files we actually want to materialize locally.
-        wanted_regular_files = []
-        wanted_part_files = []
-        for repo_file in repo_files:
-            if repo_file.startswith("mmseqs/") or repo_file.startswith("mmseqs_rna/"):
-                if ".part" in repo_file:
-                    if ".zst.part" in repo_file:
-                        wanted_part_files.append(repo_file)
-                elif repo_file.endswith(".zst"):
-                    wanted_regular_files.append(repo_file)
-                continue
-            if ".part" in repo_file:
-                wanted_part_files.append(repo_file)
-            else:
-                wanted_regular_files.append(repo_file)
+    def wanted_repo_file(repo_file: str) -> bool:
+        if repo_file.startswith("mmcif_files"):
+            return download_protein
+        if repo_file.startswith("mmseqs/"):
+            return download_protein
+        if repo_file.startswith("mmseqs_rna/"):
+            return download_rna_mmseqs
+        if repo_file.endswith(".fasta") or ".fasta.part" in repo_file:
+            return include_nhmmer
+        return False
 
-        part_files = sorted(wanted_part_files)
-        regular_files = sorted(wanted_regular_files)
+    wanted_regular_files = []
+    wanted_part_files = []
+    for repo_file in repo_files:
+        if not wanted_repo_file(repo_file):
+            continue
+        if ".part" in repo_file:
+            wanted_part_files.append(repo_file)
+        else:
+            wanted_regular_files.append(repo_file)
+
+    part_files = sorted(wanted_part_files)
+    regular_files = sorted(wanted_regular_files)
 
     # Download regular files first
     for repo_file in regular_files:
@@ -324,7 +341,7 @@ def download_from_hf():
     cpu=8,  # More CPUs for parallel downloads
     memory=32768,  # 32GB RAM
 )
-def download_databases():
+def download_databases(download_protein: bool, download_rna_fastas: bool):
     """
     Download AlphaFold3 databases from Google Cloud Storage.
 
@@ -342,14 +359,21 @@ def download_databases():
     print("=" * 60)
     print(f"Source: {DATABASE_SOURCE_URL}")
     print(f"Target: {db_path}")
-    print(f"Files: {len(DATABASE_FILES)}")
+    selected_files: list[tuple[str, str]] = []
+    if download_protein:
+        selected_files.append((MMCIF_ARCHIVE, "tar"))
+        selected_files.extend((name, "zstd") for name in PROTEIN_FASTA_FILES)
+    if download_rna_fastas:
+        selected_files.extend((name, "zstd") for name in RNA_FASTA_FILES)
+
+    print(f"Files: {len(selected_files)}")
     print("=" * 60)
     print()
 
     def download_file(args):
         """Download a single file."""
         filename, decompress_type = args
-        output_name = filename.replace(".zst", "")
+        output_name = filename.removesuffix(".zst")
 
         # Check if already downloaded
         if decompress_type == "tar":
@@ -381,7 +405,7 @@ def download_databases():
     print()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(download_file, f): f for f in DATABASE_FILES}
+        futures = {executor.submit(download_file, f): f for f in selected_files}
 
         for future in concurrent.futures.as_completed(futures):
             filename = futures[future][0]
@@ -419,7 +443,7 @@ MMSEQS_DB_ORDER = ["pdb_seqres", "small_bfd", "uniprot", "uniref90", "mgnify"]
     memory=65536,  # 64GB RAM (MMseqs2 uses streaming, doesn't need full DB in memory)
     ephemeral_disk=1024 * 1024,  # 1TiB ephemeral disk for /tmp
 )
-def convert_to_mmseqs():
+def convert_to_mmseqs(download_protein: bool, download_rna_mmseqs: bool, keep_rna_fasta: bool):
     """
     Convert FASTA databases to MMseqs2 GPU-padded format.
     """
@@ -440,7 +464,11 @@ def convert_to_mmseqs():
     try:
         db_path = Path(DATABASE_MOUNT_PATH)
         mmseqs_path = db_path / "mmseqs"
-        mmseqs_path.mkdir(exist_ok=True)
+        rna_mmseqs_path = db_path / "mmseqs_rna"
+        if download_protein:
+            mmseqs_path.mkdir(exist_ok=True)
+        if download_rna_mmseqs:
+            rna_mmseqs_path.mkdir(exist_ok=True)
 
         # IMPORTANT: Use LOCAL /tmp for MMseqs temp files (much faster than network volume)
         tmp_path = Path("/tmp/mmseqs_tmp")
@@ -451,7 +479,8 @@ def convert_to_mmseqs():
         num_cpus = os.cpu_count() or 16
 
         print(f"Source: {db_path}", flush=True)
-        print(f"Target: {mmseqs_path}", flush=True)
+        print(f"Protein target: {mmseqs_path}", flush=True)
+        print(f"RNA target: {rna_mmseqs_path}", flush=True)
         print(f"Temp dir: {tmp_path} (local SSD)", flush=True)
         print(f"CPUs: {num_cpus}", flush=True)
         print(f"Databases: {len(MMSEQS_DB_ORDER)}", flush=True)
@@ -513,216 +542,272 @@ def convert_to_mmseqs():
         print(f"  Volume space: {vol_usage.free / (1024**3):.1f} GB free", flush=True)
         print(flush=True)
 
-        # Process databases in order (smallest first)
-        for i, db_name in enumerate(MMSEQS_DB_ORDER, 1):
-            if db_name not in MMSEQS_DATABASES:
+        # Process protein databases in order (smallest first)
+        if download_protein:
+            for i, db_name in enumerate(MMSEQS_DB_ORDER, 1):
+                if db_name not in MMSEQS_DATABASES:
+                    print(
+                        f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name} - not in config, skipping",
+                        flush=True,
+                    )
+                    continue
+
+                source_fasta = MMSEQS_DATABASES[db_name]
+                source_path = db_path / source_fasta
+
+                print(f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name}", flush=True)
+                print(f"  Source: {source_fasta}", flush=True)
+
+                # Check if padded database is fully converted on volume
+                # Require ALL three critical files: data, index, and dbtype
+                padded_complete = all(
+                    (mmseqs_path / f"{db_name}_padded{ext}").exists()
+                    for ext in ("", ".index", ".dbtype")
+                )
+                if padded_complete:
+                    print(f"  SKIP: Already converted", flush=True)
+                    continue
+
+                # Clean up partial padded files from a previous failed run
+                partial_freed = 0
+                for f in sorted(mmseqs_path.glob(f"{db_name}*")):
+                    freed = f.stat().st_size / (1024**3)
+                    f.unlink()
+                    partial_freed += freed
+                    print(f"  Removed partial: {f.name} ({freed:.1f} GB)", flush=True)
+                if partial_freed > 0:
+                    db_volume.commit()
+                    vol_usage = shutil.disk_usage(DATABASE_MOUNT_PATH)
+                    print(
+                        f"  Freed {partial_freed:.1f} GB from previous run, volume: {vol_usage.free / (1024**3):.1f} GB free",
+                        flush=True,
+                    )
+
+                # Re-download source FASTA if missing (e.g. deleted by a previous
+                # failed conversion that ran out of space mid-copy)
+                if not source_path.exists():
+                    compressed = source_fasta + ".zst"
+                    url = f"{DATABASE_SOURCE_URL}/{compressed}"
+                    print(
+                        f"  Source FASTA missing, re-downloading {compressed}...",
+                        flush=True,
+                    )
+                    result = subprocess.run(
+                        f"wget -q -O - '{url}' | zstd -d > '{source_path}'",
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode != 0 or not source_path.exists():
+                        print(
+                            f"  ERROR: Failed to download {compressed}: {result.stderr}",
+                            flush=True,
+                        )
+                        raise RuntimeError(f"Cannot download {compressed}")
+                    db_volume.commit()
+                    print(
+                        f"  Downloaded {source_fasta} ({source_path.stat().st_size / (1024**3):.1f} GB)",
+                        flush=True,
+                    )
+
+                # Show source file size
+                source_size_gb = source_path.stat().st_size / (1024**3)
+                print(f"  Size: {source_size_gb:.1f} GB", flush=True)
+
+                # Build on local ephemeral disk (fast local SSD, no network write errors)
+                local_base = local_build_path / db_name
+                local_padded = local_build_path / f"{db_name}_padded"
+
+                # Step 1: Create MMseqs2 database from FASTA
+                tmp_usage = shutil.disk_usage("/tmp")
+                print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
+
                 print(
-                    f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name} - not in config, skipping",
+                    f"  Step 1/2: createdb on local disk (threads={num_cpus})...",
                     flush=True,
                 )
-                continue
 
-            source_fasta = MMSEQS_DATABASES[db_name]
-            source_path = db_path / source_fasta
-
-            print(f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name}", flush=True)
-            print(f"  Source: {source_fasta}", flush=True)
-
-            # Check if padded database is fully converted on volume
-            # Require ALL three critical files: data, index, and dbtype
-            padded_complete = all(
-                (mmseqs_path / f"{db_name}_padded{ext}").exists()
-                for ext in ("", ".index", ".dbtype")
-            )
-            if padded_complete:
-                print(f"  SKIP: Already converted", flush=True)
-                continue
-
-            # Clean up partial padded files from a previous failed run
-            partial_freed = 0
-            for f in sorted(mmseqs_path.glob(f"{db_name}*")):
-                freed = f.stat().st_size / (1024**3)
-                f.unlink()
-                partial_freed += freed
-                print(f"  Removed partial: {f.name} ({freed:.1f} GB)", flush=True)
-            if partial_freed > 0:
-                db_volume.commit()
-                vol_usage = shutil.disk_usage(DATABASE_MOUNT_PATH)
-                print(
-                    f"  Freed {partial_freed:.1f} GB from previous run, volume: {vol_usage.free / (1024**3):.1f} GB free",
-                    flush=True,
-                )
-
-            # Re-download source FASTA if missing (e.g. deleted by a previous
-            # failed conversion that ran out of space mid-copy)
-            if not source_path.exists():
-                compressed = source_fasta + ".zst"
-                url = f"{DATABASE_SOURCE_URL}/{compressed}"
-                print(
-                    f"  Source FASTA missing, re-downloading {compressed}...",
-                    flush=True,
-                )
                 result = subprocess.run(
-                    f"wget -q -O - '{url}' | zstd -d > '{source_path}'",
-                    shell=True,
+                    [
+                        "mmseqs",
+                        "createdb",
+                        str(source_path),
+                        str(local_base),
+                        "--threads",
+                        str(num_cpus),
+                    ],
                     capture_output=True,
                     text=True,
                 )
-                if result.returncode != 0 or not source_path.exists():
+                if result.returncode != 0:
+                    print(f"  ERROR stdout: {result.stdout}", flush=True)
+                    print(f"  ERROR stderr: {result.stderr}", flush=True)
+                    tmp_usage = shutil.disk_usage("/tmp")
                     print(
-                        f"  ERROR: Failed to download {compressed}: {result.stderr}",
+                        f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
                         flush=True,
                     )
-                    raise RuntimeError(f"Cannot download {compressed}")
-                db_volume.commit()
-                print(
-                    f"  Downloaded {source_fasta} ({source_path.stat().st_size / (1024**3):.1f} GB)",
-                    flush=True,
-                )
+                    raise RuntimeError(
+                        f"Failed to create database {db_name}: {result.stderr}"
+                    )
+                print(f"  createdb complete", flush=True)
 
-            # Show source file size
-            source_size_gb = source_path.stat().st_size / (1024**3)
-            print(f"  Size: {source_size_gb:.1f} GB", flush=True)
-
-            # Build on local ephemeral disk (fast local SSD, no network write errors)
-            local_base = local_build_path / db_name
-            local_padded = local_build_path / f"{db_name}_padded"
-
-            # Step 1: Create MMseqs2 database from FASTA
-            tmp_usage = shutil.disk_usage("/tmp")
-            print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
-
-            print(
-                f"  Step 1/2: createdb on local disk (threads={num_cpus})...",
-                flush=True,
-            )
-
-            result = subprocess.run(
-                [
-                    "mmseqs",
-                    "createdb",
-                    str(source_path),
-                    str(local_base),
-                    "--threads",
-                    str(num_cpus),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print(f"  ERROR stdout: {result.stdout}", flush=True)
-                print(f"  ERROR stderr: {result.stderr}", flush=True)
+                # Step 2: Create padded database for GPU
                 tmp_usage = shutil.disk_usage("/tmp")
+                print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
+
                 print(
-                    f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
+                    f"  Step 2/2: makepaddedseqdb on local disk (threads={num_cpus})...",
                     flush=True,
                 )
-                raise RuntimeError(
-                    f"Failed to create database {db_name}: {result.stderr}"
+
+                result = subprocess.run(
+                    [
+                        "mmseqs",
+                        "makepaddedseqdb",
+                        str(local_base),
+                        str(local_padded),
+                        "--threads",
+                        str(num_cpus),
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
-            print(f"  createdb complete", flush=True)
+                if result.returncode != 0:
+                    print(f"  ERROR stdout: {result.stdout}", flush=True)
+                    print(f"  ERROR stderr: {result.stderr}", flush=True)
+                    tmp_usage = shutil.disk_usage("/tmp")
+                    print(
+                        f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
+                        flush=True,
+                    )
+                    raise RuntimeError(
+                        f"Failed to create padded database {db_name}: {result.stderr}"
+                    )
 
-            # Step 2: Create padded database for GPU
-            tmp_usage = shutil.disk_usage("/tmp")
-            print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
+                # Step 3: Free volume space BEFORE copying results
+                # Delete the raw FASTA now — createdb already read it.
+                # If the copy fails later, the re-download logic above will fetch it again.
+                if source_path.exists():
+                    freed_gb = source_path.stat().st_size / (1024**3)
+                    source_path.unlink()
+                    db_volume.commit()
+                    print(
+                        f"  Deleted raw FASTA: {source_fasta} ({freed_gb:.1f} GB freed)",
+                        flush=True,
+                    )
 
-            print(
-                f"  Step 2/2: makepaddedseqdb on local disk (threads={num_cpus})...",
-                flush=True,
-            )
+                # Step 4: Copy only padded DB files to volume
+                # makepaddedseqdb creates {name}_padded* with its own headers/lookup,
+                # so base DB files ({name}_h*, {name}.lookup, etc.) are redundant.
+                print(f"  Copying padded DB files to volume...", flush=True)
+                import glob as glob_mod
 
-            result = subprocess.run(
-                [
-                    "mmseqs",
-                    "makepaddedseqdb",
-                    str(local_base),
-                    str(local_padded),
-                    "--threads",
-                    str(num_cpus),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print(f"  ERROR stdout: {result.stdout}", flush=True)
-                print(f"  ERROR stderr: {result.stderr}", flush=True)
-                tmp_usage = shutil.disk_usage("/tmp")
-                print(
-                    f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
-                    flush=True,
-                )
-                raise RuntimeError(
-                    f"Failed to create padded database {db_name}: {result.stderr}"
-                )
+                padded_prefix = f"{db_name}_padded"
+                for f in sorted(glob_mod.glob(str(local_build_path / f"{db_name}*"))):
+                    src = Path(f)
+                    if not src.name.startswith(padded_prefix):
+                        print(
+                            f"    SKIP {src.name} ({src.stat().st_size / (1024**3):.1f} GB) - base DB",
+                            flush=True,
+                        )
+                        continue
+                    dst = mmseqs_path / src.name
+                    src_size = src.stat().st_size
+                    src_size_gb = src_size / (1024**3)
+                    if dst.exists() and dst.stat().st_size == src_size:
+                        print(
+                            f"    EXISTS {src.name} ({src_size_gb:.1f} GB) - already on volume",
+                            flush=True,
+                        )
+                        continue
+                    if dst.exists():
+                        dst.unlink()
+                        db_volume.commit()
+                    shutil.copy2(str(src), str(dst))
+                    print(f"    {src.name} ({src_size_gb:.1f} GB)", flush=True)
+                    if src_size_gb > 1.0:
+                        db_volume.commit()
 
-            # Step 3: Free volume space BEFORE copying results
-            # Delete the raw FASTA now — createdb already read it.
-            # If the copy fails later, the re-download logic above will fetch it again.
-            if source_path.exists():
-                freed_gb = source_path.stat().st_size / (1024**3)
-                source_path.unlink()
+                print(f"  Done: {db_name}_padded", flush=True)
+
+                print(f"  Committing volume...", flush=True)
                 db_volume.commit()
-                print(
-                    f"  Deleted raw FASTA: {source_fasta} ({freed_gb:.1f} GB freed)",
-                    flush=True,
+
+                for f in local_build_path.glob(f"{db_name}*"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+                for tmp_file in tmp_path.glob("*"):
+                    try:
+                        if tmp_file.is_file():
+                            tmp_file.unlink()
+                        elif tmp_file.is_dir():
+                            shutil.rmtree(tmp_file)
+                    except Exception:
+                        pass
+
+        if download_rna_mmseqs:
+            print(flush=True)
+            print("Building RNA MMseqs2 databases...", flush=True)
+            for db_name, source_fasta in RNA_MMSEQS_DATABASES.items():
+                source_path = db_path / source_fasta
+                target_path = rna_mmseqs_path / db_name
+
+                print(f"  {db_name}", flush=True)
+                if (target_path.with_suffix(".dbtype")).exists():
+                    print("    SKIP: Already built", flush=True)
+                    continue
+                if not source_path.exists():
+                    raise RuntimeError(f"RNA source FASTA not found: {source_path}")
+
+                result = subprocess.run(
+                    ["mmseqs", "createdb", str(source_path), str(target_path)],
+                    capture_output=True,
+                    text=True,
                 )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to create RNA database {db_name}: {result.stderr}")
 
-            # Step 4: Copy only padded DB files to volume
-            # makepaddedseqdb creates {name}_padded* with its own headers/lookup,
-            # so base DB files ({name}_h*, {name}.lookup, etc.) are redundant.
-            print(f"  Copying padded DB files to volume...", flush=True)
-            import glob as glob_mod
-
-            padded_prefix = f"{db_name}_padded"
-            for f in sorted(glob_mod.glob(str(local_build_path / f"{db_name}*"))):
-                src = Path(f)
-                if not src.name.startswith(padded_prefix):
-                    print(
-                        f"    SKIP {src.name} ({src.stat().st_size / (1024**3):.1f} GB) - base DB",
-                        flush=True,
+                idx_tmp = Path("/tmp") / f"mmseqs_rna_idx_{db_name}"
+                idx_tmp.mkdir(exist_ok=True)
+                try:
+                    split_args: list[str] = []
+                    source_size_gb = source_path.stat().st_size / (1024**3)
+                    if source_size_gb > 10:
+                        split_args = ["--split", "4"]
+                    result = subprocess.run(
+                        [
+                            "mmseqs",
+                            "createindex",
+                            str(target_path),
+                            str(idx_tmp),
+                            "--search-type",
+                            "3",
+                            *split_args,
+                        ],
+                        capture_output=True,
+                        text=True,
                     )
-                    continue
-                dst = mmseqs_path / src.name
-                src_size = src.stat().st_size
-                src_size_gb = src_size / (1024**3)
-                if dst.exists() and dst.stat().st_size == src_size:
-                    print(
-                        f"    EXISTS {src.name} ({src_size_gb:.1f} GB) - already on volume",
-                        flush=True,
-                    )
-                    continue
-                # Remove partial destination file from a previous failed copy
-                if dst.exists():
-                    dst.unlink()
-                    db_volume.commit()
-                shutil.copy2(str(src), str(dst))
-                print(f"    {src.name} ({src_size_gb:.1f} GB)", flush=True)
-                # Commit after each large file to persist progress and free space
-                if src_size_gb > 1.0:
-                    db_volume.commit()
+                    if result.returncode != 0:
+                        raise RuntimeError(
+                            f"Failed to create RNA index {db_name}: {result.stderr}"
+                        )
+                finally:
+                    shutil.rmtree(idx_tmp, ignore_errors=True)
+                db_volume.commit()
 
-            print(f"  Done: {db_name}_padded", flush=True)
-
-            # Commit volume after each database to save progress
-            print(f"  Committing volume...", flush=True)
+        if not keep_rna_fasta:
+            print(flush=True)
+            print("Removing RNA FASTA fallback files...", flush=True)
+            for source_fasta in RNA_MMSEQS_DATABASES.values():
+                source_path = db_path / source_fasta
+                if source_path.exists():
+                    source_path.unlink()
+                    print(f"  Removed {source_fasta}", flush=True)
             db_volume.commit()
-
-            # Clean up local build files to free ephemeral disk for next database
-            for f in local_build_path.glob(f"{db_name}*"):
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-
-            # Clean up temp files
-            for tmp_file in tmp_path.glob("*"):
-                try:
-                    if tmp_file.is_file():
-                        tmp_file.unlink()
-                    elif tmp_file.is_dir():
-                        shutil.rmtree(tmp_file)
-                except Exception:
-                    pass
 
         # Final cleanup
         print(flush=True)
@@ -880,19 +965,28 @@ def check_status():
 def main(
     status: bool = False,
     convert_only: bool = False,
-    from_prebuilt: bool = False,
+    from_source: bool = False,
+    protein_only: bool = False,
+    rna_only: bool = False,
+    include_nhmmer: bool = False,
 ):
     """
     Prepare AlphaFold3 databases on Modal.
 
-    Downloads from Google Cloud Storage and converts to MMseqs2 format,
-    or downloads pre-built databases from HuggingFace Hub.
+    Default mode downloads pre-built databases from HuggingFace.
+    Use --from-source to download FASTA files from Google Cloud and build
+    MMseqs databases on Modal.
 
     Args:
         status: Check current database status
         convert_only: Only run MMseqs2 conversion (databases must exist)
-        from_prebuilt: Download pre-built databases from HuggingFace (~1 hour)
+        from_source: Build selected databases from Google Cloud source data
+        protein_only: Install only protein databases and mmCIF files
+        rna_only: Install only RNA databases
+        include_nhmmer: Keep RNA FASTA fallback files for nhmmer
     """
+    mode = resolve_modes(protein_only, rna_only, include_nhmmer)
+
     print()
     print("=" * 60)
     print("AlphaFold3 Database Setup")
@@ -903,38 +997,47 @@ def main(
         check_status.remote()
         return
 
-    if from_prebuilt:
-        print("Mode: Download pre-built databases from HuggingFace")
+    if convert_only:
+        print("Mode: MMseqs conversion only")
+        print()
+        convert_to_mmseqs.remote(
+            mode["download_protein"],
+            mode["download_rna_mmseqs"],
+            mode["keep_rna_fasta"],
+        )
+        check_status.remote()
+        return
+
+    print(f"Protein databases: {mode['download_protein']}")
+    print(f"RNA MMseqs2 databases: {mode['download_rna_mmseqs']}")
+    print(f"RNA FASTA fallback: {mode['keep_rna_fasta']}")
+    print()
+
+    if from_source:
+        print("Mode: download source databases and build locally on Modal")
+        print()
+        print("Step 1/2: Downloading source databases...")
+        download_databases.remote(
+            mode["download_protein"],
+            mode["download_rna_fastas"],
+        )
+
+        print()
+        print("Step 2/2: Building MMseqs databases...")
+        convert_to_mmseqs.remote(
+            mode["download_protein"],
+            mode["download_rna_mmseqs"],
+            mode["keep_rna_fasta"],
+        )
+    else:
+        print("Mode: download pre-built databases from HuggingFace")
         print(f"Repository: {HF_PREBUILT_REPO}")
         print()
-        print("This will download pre-built MMseqs2 GPU databases directly")
-        print("to your Modal volume. No conversion step needed.")
-        print()
-        download_from_hf.remote()
-        check_status.remote()
-        return
-
-    if convert_only:
-        print("Mode: MMseqs2 conversion only")
-        print()
-        convert_to_mmseqs.remote()
-        check_status.remote()
-        return
-
-    # Full setup: download + convert
-    print("Mode: Full setup (download + convert)")
-    print()
-    print("This will:")
-    print("  1. Download databases from Google Cloud (~530GB)")
-    print("  2. Convert to MMseqs2 GPU format")
-    print()
-
-    print("Step 1/2: Downloading databases...")
-    download_databases.remote()
-
-    print()
-    print("Step 2/2: Converting to MMseqs2...")
-    convert_to_mmseqs.remote()
+        download_from_hf.remote(
+            mode["download_protein"],
+            mode["download_rna_mmseqs"],
+            mode["keep_rna_fasta"],
+        )
 
     print()
     check_status.remote()

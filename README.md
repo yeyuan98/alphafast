@@ -16,7 +16,7 @@ Also check out the MMSeqs2-GPU paper [here](https://www.nature.com/articles/s415
 > [Google DeepMind's Terms of Use](WEIGHTS_TERMS_OF_USE.md).
 > You must apply for and receive weights directly from Google. This is not an officially supported Google product.
 >
-> **Note**: Protein MSA uses MMseqs2-GPU. RNA MSA uses `mmseqs_rna` by default when present, and can optionally fall back to nhmmer via RNA FASTA databases. DNA chains use empty MSA, matching AlphaFold 3's native behavior.
+> **Note**: Protein MSA uses MMseqs2-GPU. RNA MSA uses MMseqs-CPU by default when present, and can optionally fall back to nhmmer via RNA FASTA databases. DNA chains use empty MSA, matching AlphaFold 3's native behavior.
 >
 ## Quick Start
 

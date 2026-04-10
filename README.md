@@ -16,7 +16,7 @@ Also check out the MMSeqs2-GPU paper [here](https://www.nature.com/articles/s415
 > [Google DeepMind's Terms of Use](WEIGHTS_TERMS_OF_USE.md).
 > You must apply for and receive weights directly from Google. This is not an officially supported Google product.
 >
-> **Note**: RNA MSA search uses nhmmer (CPU-based). DNA chains use empty MSA, matching AlphaFold 3's native behavior.
+> **Note**: Protein MSA uses MMseqs2-GPU. RNA MSA uses `mmseqs_rna` by default when present, and can optionally fall back to nhmmer via RNA FASTA databases. DNA chains use empty MSA, matching AlphaFold 3's native behavior.
 >
 ## Quick Start
 
@@ -40,14 +40,27 @@ business days. You will receive a file of compressed weights named `af3.bin.zst`
 
 ### Step 3: Download and Convert Databases
 
-Downloads and converts protein sequence databases to MMseqs2 GPU format.
+Downloads AlphaFast databases. By default this installs pre-built protein MMseqs2, RNA MMseqs2, and mmCIF data from HuggingFace.
 
-> **Important:** Point `path/to/databases` to a fast data drive (NVMe recommended). You will need a minimum of **1.1 TB** free disk space for the default setup (250 GB download + 540 GB protein MMseqs2 padded + 234 GB mmCIF + 89 GB RNA FASTA). The optional MMseqs2 nucleotide databases for faster RNA search add ~865 GB (use `--rna_mmseqs_db_dir`). For pre-built databases from HuggingFace, use `--from-prebuilt` to skip conversion.
+> **Important:** Point `path/to/databases` to a fast data drive (NVMe recommended). The default pre-built install includes protein MMseqs2, RNA MMseqs2, and mmCIF data. Add `--include-nhmmer` only if you want RNA FASTA fallback files for forced `--use_nhmmer` runs. Use `--from-source` only for advanced rebuild workflows.
 >
-> **Prerequisite:** The `mmseqs` binary (GPU version), `wget`, `zstd`, and `tar` must be installed and in your `PATH` before running this script. See [docs/building.md](docs/building.md) for MMseqs2 installation instructions.
+> **Prerequisite:** Pre-built mode requires `hf`, `zstd`, and `tar`. `--from-source` additionally requires `wget` and `mmseqs`. See [docs/building.md](docs/building.md) for MMseqs2 installation instructions.
 
 ```bash
+# Default: protein + RNA MMseqs + mmCIF from HuggingFace
 ./scripts/setup_databases.sh /path/to/databases
+
+# Add RNA FASTA fallback files for forced nhmmer runs
+./scripts/setup_databases.sh /path/to/databases --include-nhmmer
+
+# Protein-only pre-built install
+./scripts/setup_databases.sh /path/to/databases --protein-only
+
+# RNA-only pre-built install
+./scripts/setup_databases.sh /path/to/databases --rna-only
+
+# Build from Google-hosted source data instead of using pre-built artifacts
+./scripts/setup_databases.sh /path/to/databases --from-source
 ```
 
 ### Step 4: Pull Container
@@ -137,6 +150,19 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --gpu_devices 0,1,2,3
 ```
 
+**Force nhmmer for RNA:**
+
+```bash
+./scripts/run_alphafast.sh \
+    --input_dir /path/to/inputs \
+    --output_dir /path/to/outputs \
+    --db_dir /path/to/databases \
+    --weights_dir /path/to/weights \
+    --use_nhmmer
+```
+
+This requires RNA FASTA fallback files to be present, e.g. from `./scripts/setup_databases.sh /path/to/databases --include-nhmmer`.
+
 ### How Multi-GPU Mode Works
 
 When multiple devices are specified via `--gpu_devices`, AlphaFast runs a **phase-separated parallel pipeline**:
@@ -153,7 +179,7 @@ At large batch sizes, every GPU is 100% utilized in each phase, achieving near-l
 
 ### Step 3: Install Databases
 >
-> **Important:** Point `path/to/databases` to a high speed volume with fast network transfer. You will need a minimum of **1.1 TB** free disk space on this partition (250 GB download + 540 GB MMseqs2 padded + 234 GB mmCIF + 89 GB RNA FASTA). Use `--from-prebuilt` to download pre-built databases from HuggingFace. AlphaFast will spend roughly ~1 hour to copy the databases to a local NVMe volume (often called `/scratch` on HPC systems). If this is not available, then make sure the databases are on the fastest I/O partition possible.
+> **Important:** Point `path/to/databases` to a high speed volume with fast network transfer. The default `setup_databases.sh` mode downloads pre-built protein MMseqs2, RNA MMseqs2, and mmCIF data from HuggingFace. Add `--include-nhmmer` only if you also want RNA FASTA fallback files. AlphaFast will spend roughly ~1 hour to copy the databases to a local NVMe volume (often called `/scratch` on HPC systems). If this is not available, then make sure the databases are on the fastest I/O partition possible.
 > **Note:** You may need to edit the SLURM directives to match your university's specific HPC formatting.
 
 ```bash
@@ -162,6 +188,9 @@ sbatch scripts/setup_databases.sbatch /path/to/databases
 
 # Or run directly in an interactive session:
 ./scripts/setup_databases.sh /path/to/databases
+
+# Optional: include RNA FASTA fallback for forced nhmmer runs
+sbatch scripts/setup_databases.sbatch /path/to/databases --include-nhmmer
 ```
 
 ### Step 4: Pull Container
@@ -225,7 +254,13 @@ Modal provides serverless GPU inference with pay-per-second billing.
 ```bash
 pip install modal && modal token new
 modal run modal/upload_weights.py --file /path/to/af3.bin.zst --no-extract
-modal run modal/prepare_databases.py --from-prebuilt   # ~1 hour, downloads pre-built DBs from HuggingFace
+modal run modal/prepare_databases.py
+
+# Optional: include RNA FASTA fallback for nhmmer
+modal run modal/prepare_databases.py --include-nhmmer
+
+# Advanced: build on Modal from Google-hosted source data
+modal run modal/prepare_databases.py --from-source
 
 # Run predictions
 modal run modal/af3_predict.py --input protein.json

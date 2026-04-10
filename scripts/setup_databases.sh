@@ -7,8 +7,9 @@
 #
 # Download AlphaFold 3 databases for AlphaFast.
 #
-# Default mode downloads pre-built databases from HuggingFace (recommended).
-# Use --from-source to build from Google Cloud Storage FASTA files instead.
+# Default mode downloads fully pre-built databases from HuggingFace.
+# Use --from-source to download raw databases from Google Cloud Storage and
+# build MMseqs databases locally.
 #
 # Usage:
 #   ./scripts/setup_databases.sh <target_dir> [OPTIONS]
@@ -19,8 +20,7 @@
 # Requirements (default / HuggingFace mode):
 #   - hf CLI (HuggingFace): curl -LsSf https://hf.co/cli/install.sh | bash -s
 #   - zstd, tar in PATH (for mmCIF extraction)
-#   - ~800 GB free disk space (or ~100 GB less with --build-rna-index)
-#   - mmseqs in PATH (only if --build-rna-index is used)
+#   - ~800 GB free disk space
 #
 # Requirements (--from-source mode):
 #   - wget, zstd, tar in PATH
@@ -37,7 +37,7 @@
 #       uniprot_padded*
 #       pdb_seqres_padded*
 #     mmseqs_rna/
-#       rfam*                   # MMseqs2 nucleotide databases (RNA, default)
+#       rfam*                   # MMseqs2 nucleotide databases (default RNA search)
 #       rnacentral*
 #       nt_rna*
 #     rnacentral_active_seq_id_90_cov_80_linclust.fasta   # RNA FASTA (nhmmer fallback)
@@ -54,8 +54,9 @@ usage() {
   echo ""
   echo "Downloads AlphaFold 3 databases for AlphaFast."
   echo ""
-  echo "Default mode downloads pre-built databases from HuggingFace (recommended)."
-  echo "Use --from-source to build from Google Cloud Storage FASTA files."
+  echo "Default mode downloads fully pre-built databases from HuggingFace."
+  echo "Use --from-source to download raw databases from Google Cloud Storage"
+  echo "and build MMseqs databases locally."
   echo ""
   echo "Arguments:"
   echo "  target_dir           Directory where databases will be stored"
@@ -66,9 +67,10 @@ usage() {
   echo "  --protein-only       Download only protein databases and mmCIF structures."
   echo "                       Skips RNA databases (both FASTA and MMseqs2)."
   echo "  --all                Download everything: protein + RNA databases (default)"
-  echo "  --build-rna-index    Build RNA search indices locally instead of downloading"
-  echo "                       pre-built ones (~830 GB smaller download). Requires mmseqs."
-  echo "                       Only applies to --from-prebuilt mode (default)."
+  echo "  --rna-mmseqs-only    Download/build RNA MMseqs2 databases, skip RNA FASTA fallback."
+  echo "  --rna-fasta-only     Download RNA FASTA fallback only, skip RNA MMseqs2 databases."
+  echo "  --skip-rna-mmseqs    Skip RNA MMseqs2 databases."
+  echo "  --skip-rna-fasta     Skip RNA FASTA fallback databases."
   echo "  --keep-fasta         Keep raw FASTA files after conversion (default, --from-source only)"
   echo "  --no-keep-fasta      Remove raw FASTA files after conversion (--from-source only)"
   exit 1
@@ -82,9 +84,10 @@ TARGET_DIR="$1"
 shift
 
 KEEP_FASTA=true
-FROM_PREBUILT=true    # HuggingFace is the default
-DB_SCOPE="all"        # "all" or "protein-only"
-BUILD_RNA_INDEX=false # Build RNA indices locally instead of downloading pre-built
+FROM_PREBUILT=true # HuggingFace is the default
+DB_SCOPE="all"     # "all" or "protein-only"
+DOWNLOAD_RNA_MMSEQS=true
+DOWNLOAD_RNA_FASTA=true
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -116,8 +119,24 @@ while [ "$#" -gt 0 ]; do
     DB_SCOPE="all"
     shift
     ;;
-  --build-rna-index)
-    BUILD_RNA_INDEX=true
+  --rna-mmseqs-only)
+    DB_SCOPE="all"
+    DOWNLOAD_RNA_MMSEQS=true
+    DOWNLOAD_RNA_FASTA=false
+    shift
+    ;;
+  --rna-fasta-only)
+    DB_SCOPE="all"
+    DOWNLOAD_RNA_MMSEQS=false
+    DOWNLOAD_RNA_FASTA=true
+    shift
+    ;;
+  --skip-rna-mmseqs)
+    DOWNLOAD_RNA_MMSEQS=false
+    shift
+    ;;
+  --skip-rna-fasta)
+    DOWNLOAD_RNA_FASTA=false
     shift
     ;;
   *)
@@ -149,13 +168,6 @@ else
       MISSING=1
     fi
   done
-fi
-if $FROM_PREBUILT && $BUILD_RNA_INDEX; then
-  if ! command -v mmseqs &>/dev/null; then
-    echo "ERROR: mmseqs is required for --build-rna-index but not found in PATH."
-    echo "  Install: wget https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz"
-    MISSING=1
-  fi
 fi
 if [ "$MISSING" -ne 0 ]; then
   echo ""
@@ -191,16 +203,47 @@ RNA_FASTAS=(
 
 mkdir -p "$TARGET_DIR" "$MMSEQS_DIR"
 
+reassemble_part_files() {
+  local target_dir="$1"
+  shopt -s nullglob
+  for part_prefix in "${target_dir}"/*.part00; do
+    if [ -f "$part_prefix" ]; then
+      local base="${part_prefix%.part00}"
+      echo "Reassembling $(basename "$base")..."
+      cat "${base}.part"* > "$base"
+      rm -f "${base}.part"*
+    fi
+  done
+  shopt -u nullglob
+}
+
+decompress_zst_files() {
+  local target_dir="$1"
+  shopt -s nullglob
+  for compressed in "${target_dir}"/*.zst; do
+    if [ -f "$compressed" ]; then
+      local output="${compressed%.zst}"
+      if [ -f "$output" ]; then
+        echo "SKIP: $(basename "$output") already decompressed"
+        rm -f "$compressed"
+        continue
+      fi
+      echo "Decompressing $(basename "$compressed")..."
+      zstd --decompress --force --rm -o "$output" "$compressed"
+    fi
+  done
+  shopt -u nullglob
+}
+
 echo "=========================================="
 echo "AlphaFast Database Setup"
 echo "=========================================="
 echo "Target directory: $TARGET_DIR"
 echo "MMseqs2 directory: $MMSEQS_DIR"
-echo "Mode:             $(if $FROM_PREBUILT; then echo 'pre-built (HuggingFace)'; else echo 'build from FASTA'; fi)"
+echo "Mode:             $(if $FROM_PREBUILT; then echo 'pre-built (HuggingFace)'; else echo 'download raw + build locally'; fi)"
 echo "Scope:            $DB_SCOPE"
-if [ "$DB_SCOPE" = "all" ]; then
-  echo "RNA index:        $(if $BUILD_RNA_INDEX; then echo 'build locally (--build-rna-index)'; else echo 'download pre-built (~830 GB)'; fi)"
-fi
+echo "RNA MMseqs2:      $DOWNLOAD_RNA_MMSEQS"
+echo "RNA FASTA:        $DOWNLOAD_RNA_FASTA"
 echo "Keep FASTA files: $KEEP_FASTA"
 echo "Start time: $(date)"
 echo "=========================================="
@@ -232,75 +275,38 @@ if $FROM_PREBUILT; then
     echo "SKIP: Protein MMseqs2 databases already exist"
   else
     echo "Downloading protein MMseqs2 padded databases..."
-    hf download "$HF_REPO" --repo-type dataset --include "mmseqs/*" --local-dir "$TARGET_DIR"
-    # Reassemble any split .partNN files (HuggingFace splits large files)
-    for part_prefix in "${MMSEQS_DIR}"/*.part00; do
-      if [ -f "$part_prefix" ]; then
-        base="${part_prefix%.part00}"
-        echo "Reassembling $(basename "$base")..."
-        cat "${base}.part"* > "$base"
-        rm -f "${base}.part"*
-      fi
-    done
+    hf download "$HF_REPO" --repo-type dataset \
+      --include "mmseqs/*.zst" --include "mmseqs/*.zst.*" \
+      --local-dir "$TARGET_DIR"
+    # Reassemble any split .partNN files and decompress .zst payloads.
+    reassemble_part_files "$MMSEQS_DIR"
+    decompress_zst_files "$MMSEQS_DIR"
     echo "Done: Protein MMseqs2 databases"
   fi
   echo ""
 
-  if [ "$DB_SCOPE" = "all" ]; then
+  if [ "$DB_SCOPE" = "all" ] && [ "$DOWNLOAD_RNA_MMSEQS" = true ]; then
     RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
     if [ -f "${RNA_MMSEQS_DIR}/rfam.dbtype" ]; then
       echo "SKIP: RNA MMseqs2 databases already exist"
-    elif $BUILD_RNA_INDEX; then
-      # Download database files only (skip pre-built .idx indices)
-      echo "Downloading RNA MMseqs2 databases (without pre-built indices)..."
-      hf download "$HF_REPO" --repo-type dataset \
-        --include "mmseqs_rna/*" --exclude "mmseqs_rna/*.idx*" \
-        --local-dir "$TARGET_DIR"
-      echo "Done: RNA MMseqs2 database files (~99 GB)"
-      echo ""
-
-      # Build indices locally
-      echo "Building RNA search indices locally (mmseqs createindex)..."
-      echo "Using MMseqs2 version: $(mmseqs version)"
-      for rna_db in rfam rnacentral nt_rna; do
-        target_db="${RNA_MMSEQS_DIR}/${rna_db}"
-        if [ ! -f "${target_db}.dbtype" ]; then
-          echo "  SKIP: ${rna_db} database not found"
-          continue
-        fi
-        if [ -f "${target_db}.idx.dbtype" ]; then
-          echo "  SKIP: ${rna_db} index already exists"
-          continue
-        fi
-        echo "  Creating search index for ${rna_db}..."
-        idx_tmp=$(mktemp -d)
-        db_size_gb=$(du -B1G "$target_db" 2>/dev/null | cut -f1)
-        split_flag=""
-        if [ "${db_size_gb:-0}" -gt 10 ]; then
-          split_flag="--split 4"
-          echo "    Using --split 4 for large database (${db_size_gb}G)"
-        fi
-        time mmseqs createindex "$target_db" "$idx_tmp" --search-type 3 $split_flag
-        rm -rf "$idx_tmp"
-        echo "  Done: ${rna_db} index"
-      done
     else
       # Download everything including pre-built indices (default)
       echo "Downloading RNA MMseqs2 nucleotide databases (with pre-built indices)..."
-      hf download "$HF_REPO" --repo-type dataset --include "mmseqs_rna/*" --local-dir "$TARGET_DIR"
-      # Reassemble any split .partNN files
-      for part_prefix in "${RNA_MMSEQS_DIR}"/*.part00; do
-        if [ -f "$part_prefix" ]; then
-          base="${part_prefix%.part00}"
-          echo "Reassembling $(basename "$base")..."
-          cat "${base}.part"* > "$base"
-          rm -f "${base}.part"*
-        fi
-      done
+      hf download "$HF_REPO" --repo-type dataset \
+        --include "mmseqs_rna/*.zst" --include "mmseqs_rna/*.zst.*" \
+        --local-dir "$TARGET_DIR"
+      reassemble_part_files "$RNA_MMSEQS_DIR"
+      decompress_zst_files "$RNA_MMSEQS_DIR"
       echo "Done: RNA MMseqs2 databases"
     fi
     echo ""
 
+  elif [ "$DB_SCOPE" = "all" ]; then
+    echo "SKIP: RNA MMseqs2 databases (--skip-rna-mmseqs or --rna-fasta-only)"
+    echo ""
+  fi
+
+  if [ "$DB_SCOPE" = "all" ] && [ "$DOWNLOAD_RNA_FASTA" = true ]; then
     # Download RNA FASTA databases (for nhmmer fallback)
     echo "Downloading RNA FASTA databases (for nhmmer fallback)..."
     hf download "$HF_REPO" --repo-type dataset --include "*.fasta" --include "*.fasta.*" --local-dir "$TARGET_DIR"
@@ -314,6 +320,9 @@ if $FROM_PREBUILT; then
       fi
     done
     echo "Done: RNA FASTA databases"
+    echo ""
+  elif [ "$DB_SCOPE" = "all" ]; then
+    echo "SKIP: RNA FASTA databases (--skip-rna-fasta or --rna-mmseqs-only)"
     echo ""
   else
     echo "SKIP: RNA databases (--protein-only mode)"
@@ -380,7 +389,7 @@ else
     "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta"
   )
 
-  if [ "$DB_SCOPE" = "all" ]; then
+  if [ "$DB_SCOPE" = "all" ] && [ "$DOWNLOAD_RNA_FASTA" = true ]; then
     for fasta_file in "${RNA_FASTAS[@]}"; do
       target_path="${TARGET_DIR}/${fasta_file}"
       if [ -f "$target_path" ]; then
@@ -393,6 +402,8 @@ else
         echo "Done: $fasta_file"
       fi
     done
+  elif [ "$DB_SCOPE" = "all" ]; then
+    echo "SKIP: RNA FASTA downloads (--skip-rna-fasta or --rna-mmseqs-only)"
   else
     echo "SKIP: RNA FASTA downloads (--protein-only mode)"
   fi
@@ -401,7 +412,7 @@ else
   # ---------------------------------------------------------------------------
   # Step 1b: Build MMseqs2 databases from RNA FASTA (for nucleotide search)
   # ---------------------------------------------------------------------------
-  if [ "$DB_SCOPE" = "all" ]; then
+  if [ "$DB_SCOPE" = "all" ] && [ "$DOWNLOAD_RNA_MMSEQS" = true ]; then
     echo "=== Step 1b: Build MMseqs2 RNA databases (optional) ==="
     echo ""
 
@@ -447,6 +458,10 @@ else
       echo "Done: $db_name"
     done
     echo ""
+  elif [ "$DB_SCOPE" = "all" ]; then
+    echo "SKIP: RNA MMseqs2 database build (--skip-rna-mmseqs or --rna-fasta-only)"
+    echo ""
+    RNA_MMSEQS_DIR="${TARGET_DIR}/mmseqs_rna"
   else
     echo "SKIP: RNA MMseqs2 database build (--protein-only mode)"
     echo ""

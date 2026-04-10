@@ -105,6 +105,7 @@ hf_image = (
 # DOWNLOAD PRE-BUILT DATABASES FROM HUGGINGFACE
 # =============================================================================
 
+
 @app.function(
     image=hf_image,
     volumes={DATABASE_MOUNT_PATH: db_volume},
@@ -124,6 +125,35 @@ def download_from_hf():
     import subprocess
     import shutil
 
+    def _decompress_zst_tree(root: Path) -> None:
+        if not root.exists():
+            return
+        for compressed in sorted(root.glob("*.zst")):
+            output = compressed.with_suffix("")
+            if output.exists() and output.stat().st_size > 0:
+                print(f"  SKIP: {output.relative_to(db_path)} already decompressed")
+                compressed.unlink()
+                continue
+            print(f"  Decompressing: {compressed.relative_to(db_path)}...")
+            result = subprocess.run(
+                [
+                    "zstd",
+                    "--decompress",
+                    "--force",
+                    "--rm",
+                    "-o",
+                    str(output),
+                    str(compressed),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to decompress {compressed}: {result.stderr}"
+                )
+            db_volume.commit()
+
     db_path = Path(DATABASE_MOUNT_PATH)
     db_path.mkdir(parents=True, exist_ok=True)
 
@@ -140,9 +170,24 @@ def download_from_hf():
     print(f"Found {len(repo_files)} files in repository")
     print()
 
-    # Separate regular files from .part* split files
-    part_files = sorted(f for f in repo_files if ".part" in f)
-    regular_files = sorted(f for f in repo_files if ".part" not in f)
+        # Keep only the repo files we actually want to materialize locally.
+        wanted_regular_files = []
+        wanted_part_files = []
+        for repo_file in repo_files:
+            if repo_file.startswith("mmseqs/") or repo_file.startswith("mmseqs_rna/"):
+                if ".part" in repo_file:
+                    if ".zst.part" in repo_file:
+                        wanted_part_files.append(repo_file)
+                elif repo_file.endswith(".zst"):
+                    wanted_regular_files.append(repo_file)
+                continue
+            if ".part" in repo_file:
+                wanted_part_files.append(repo_file)
+            else:
+                wanted_regular_files.append(repo_file)
+
+        part_files = sorted(wanted_part_files)
+        regular_files = sorted(wanted_regular_files)
 
     # Download regular files first
     for repo_file in regular_files:
@@ -175,6 +220,7 @@ def download_from_hf():
     # Group parts by their base name (e.g. mmseqs/mgnify_padded.part00 → mmseqs/mgnify_padded)
     if part_files:
         from collections import defaultdict
+
         part_groups = defaultdict(list)
         for pf in part_files:
             # Strip .partNN suffix to get base name
@@ -238,7 +284,14 @@ def download_from_hf():
             continue
         print(f"  Extracting {tar_name}...")
         if tar_name.endswith(".tar.zst"):
-            cmd = ["tar", "--use-compress-program=zstd", "-xf", str(tar_path), "-C", str(db_path)]
+            cmd = [
+                "tar",
+                "--use-compress-program=zstd",
+                "-xf",
+                str(tar_path),
+                "-C",
+                str(db_path),
+            ]
         else:
             cmd = ["tar", "-xf", str(tar_path), "-C", str(db_path)]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -249,6 +302,10 @@ def download_from_hf():
             tar_path.unlink()
             db_volume.commit()
 
+    # Decompress MMseqs database payloads after regular downloads/reassembly.
+    _decompress_zst_tree(db_path / "mmseqs")
+    _decompress_zst_tree(db_path / "mmseqs_rna")
+
     print()
     print("=" * 60)
     print("Pre-built Database Download Complete!")
@@ -258,6 +315,7 @@ def download_from_hf():
 # =============================================================================
 # DOWNLOAD DATABASES
 # =============================================================================
+
 
 @app.function(
     image=download_image,
@@ -412,9 +470,15 @@ def convert_to_mmseqs():
 
         # Free volume space: delete raw FASTAs and redundant base sequence
         # files for databases already converted
-        print("Checking for reclaimable space from already-converted databases...", flush=True)
+        print(
+            "Checking for reclaimable space from already-converted databases...",
+            flush=True,
+        )
         vol_usage = shutil.disk_usage(DATABASE_MOUNT_PATH)
-        print(f"  Volume space: {vol_usage.used / (1024**3):.1f} GB used, {vol_usage.free / (1024**3):.1f} GB free", flush=True)
+        print(
+            f"  Volume space: {vol_usage.used / (1024**3):.1f} GB used, {vol_usage.free / (1024**3):.1f} GB free",
+            flush=True,
+        )
         freed_total = 0
         for db_name, source_fasta in MMSEQS_DATABASES.items():
             # Only consider fully converted databases (all 3 critical files)
@@ -433,6 +497,7 @@ def convert_to_mmseqs():
                 print(f"  Deleted {source_fasta} ({freed_gb:.1f} GB)", flush=True)
             # Delete ALL base DB files (padded version has its own headers/lookup).
             import glob as glob_mod
+
             for match in glob_mod.glob(str(mmseqs_path / f"{db_name}*")):
                 base_file = Path(match)
                 if base_file.name.startswith(f"{db_name}_padded"):
@@ -451,7 +516,10 @@ def convert_to_mmseqs():
         # Process databases in order (smallest first)
         for i, db_name in enumerate(MMSEQS_DB_ORDER, 1):
             if db_name not in MMSEQS_DATABASES:
-                print(f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name} - not in config, skipping", flush=True)
+                print(
+                    f"[{i}/{len(MMSEQS_DB_ORDER)}] {db_name} - not in config, skipping",
+                    flush=True,
+                )
                 continue
 
             source_fasta = MMSEQS_DATABASES[db_name]
@@ -480,23 +548,37 @@ def convert_to_mmseqs():
             if partial_freed > 0:
                 db_volume.commit()
                 vol_usage = shutil.disk_usage(DATABASE_MOUNT_PATH)
-                print(f"  Freed {partial_freed:.1f} GB from previous run, volume: {vol_usage.free / (1024**3):.1f} GB free", flush=True)
+                print(
+                    f"  Freed {partial_freed:.1f} GB from previous run, volume: {vol_usage.free / (1024**3):.1f} GB free",
+                    flush=True,
+                )
 
             # Re-download source FASTA if missing (e.g. deleted by a previous
             # failed conversion that ran out of space mid-copy)
             if not source_path.exists():
                 compressed = source_fasta + ".zst"
                 url = f"{DATABASE_SOURCE_URL}/{compressed}"
-                print(f"  Source FASTA missing, re-downloading {compressed}...", flush=True)
+                print(
+                    f"  Source FASTA missing, re-downloading {compressed}...",
+                    flush=True,
+                )
                 result = subprocess.run(
                     f"wget -q -O - '{url}' | zstd -d > '{source_path}'",
-                    shell=True, capture_output=True, text=True,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if result.returncode != 0 or not source_path.exists():
-                    print(f"  ERROR: Failed to download {compressed}: {result.stderr}", flush=True)
+                    print(
+                        f"  ERROR: Failed to download {compressed}: {result.stderr}",
+                        flush=True,
+                    )
                     raise RuntimeError(f"Cannot download {compressed}")
                 db_volume.commit()
-                print(f"  Downloaded {source_fasta} ({source_path.stat().st_size / (1024**3):.1f} GB)", flush=True)
+                print(
+                    f"  Downloaded {source_fasta} ({source_path.stat().st_size / (1024**3):.1f} GB)",
+                    flush=True,
+                )
 
             # Show source file size
             source_size_gb = source_path.stat().st_size / (1024**3)
@@ -510,14 +592,19 @@ def convert_to_mmseqs():
             tmp_usage = shutil.disk_usage("/tmp")
             print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
 
-            print(f"  Step 1/2: createdb on local disk (threads={num_cpus})...", flush=True)
+            print(
+                f"  Step 1/2: createdb on local disk (threads={num_cpus})...",
+                flush=True,
+            )
 
             result = subprocess.run(
                 [
-                    "mmseqs", "createdb",
+                    "mmseqs",
+                    "createdb",
                     str(source_path),
                     str(local_base),
-                    "--threads", str(num_cpus),
+                    "--threads",
+                    str(num_cpus),
                 ],
                 capture_output=True,
                 text=True,
@@ -526,22 +613,32 @@ def convert_to_mmseqs():
                 print(f"  ERROR stdout: {result.stdout}", flush=True)
                 print(f"  ERROR stderr: {result.stderr}", flush=True)
                 tmp_usage = shutil.disk_usage("/tmp")
-                print(f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
-                raise RuntimeError(f"Failed to create database {db_name}: {result.stderr}")
+                print(
+                    f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"Failed to create database {db_name}: {result.stderr}"
+                )
             print(f"  createdb complete", flush=True)
 
             # Step 2: Create padded database for GPU
             tmp_usage = shutil.disk_usage("/tmp")
             print(f"  /tmp space: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
 
-            print(f"  Step 2/2: makepaddedseqdb on local disk (threads={num_cpus})...", flush=True)
+            print(
+                f"  Step 2/2: makepaddedseqdb on local disk (threads={num_cpus})...",
+                flush=True,
+            )
 
             result = subprocess.run(
                 [
-                    "mmseqs", "makepaddedseqdb",
+                    "mmseqs",
+                    "makepaddedseqdb",
                     str(local_base),
                     str(local_padded),
-                    "--threads", str(num_cpus),
+                    "--threads",
+                    str(num_cpus),
                 ],
                 capture_output=True,
                 text=True,
@@ -550,8 +647,13 @@ def convert_to_mmseqs():
                 print(f"  ERROR stdout: {result.stdout}", flush=True)
                 print(f"  ERROR stderr: {result.stderr}", flush=True)
                 tmp_usage = shutil.disk_usage("/tmp")
-                print(f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free", flush=True)
-                raise RuntimeError(f"Failed to create padded database {db_name}: {result.stderr}")
+                print(
+                    f"  /tmp space after error: {tmp_usage.free / (1024**3):.1f} GB free",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"Failed to create padded database {db_name}: {result.stderr}"
+                )
 
             # Step 3: Free volume space BEFORE copying results
             # Delete the raw FASTA now — createdb already read it.
@@ -560,24 +662,34 @@ def convert_to_mmseqs():
                 freed_gb = source_path.stat().st_size / (1024**3)
                 source_path.unlink()
                 db_volume.commit()
-                print(f"  Deleted raw FASTA: {source_fasta} ({freed_gb:.1f} GB freed)", flush=True)
+                print(
+                    f"  Deleted raw FASTA: {source_fasta} ({freed_gb:.1f} GB freed)",
+                    flush=True,
+                )
 
             # Step 4: Copy only padded DB files to volume
             # makepaddedseqdb creates {name}_padded* with its own headers/lookup,
             # so base DB files ({name}_h*, {name}.lookup, etc.) are redundant.
             print(f"  Copying padded DB files to volume...", flush=True)
             import glob as glob_mod
+
             padded_prefix = f"{db_name}_padded"
             for f in sorted(glob_mod.glob(str(local_build_path / f"{db_name}*"))):
                 src = Path(f)
                 if not src.name.startswith(padded_prefix):
-                    print(f"    SKIP {src.name} ({src.stat().st_size / (1024**3):.1f} GB) - base DB", flush=True)
+                    print(
+                        f"    SKIP {src.name} ({src.stat().st_size / (1024**3):.1f} GB) - base DB",
+                        flush=True,
+                    )
                     continue
                 dst = mmseqs_path / src.name
                 src_size = src.stat().st_size
                 src_size_gb = src_size / (1024**3)
                 if dst.exists() and dst.stat().st_size == src_size:
-                    print(f"    EXISTS {src.name} ({src_size_gb:.1f} GB) - already on volume", flush=True)
+                    print(
+                        f"    EXISTS {src.name} ({src_size_gb:.1f} GB) - already on volume",
+                        flush=True,
+                    )
                     continue
                 # Remove partial destination file from a previous failed copy
                 if dst.exists():
@@ -625,6 +737,7 @@ def convert_to_mmseqs():
 
     except Exception as e:
         import traceback
+
         print(f"ERROR: {e}", flush=True)
         print(traceback.format_exc(), flush=True)
         raise
@@ -633,6 +746,7 @@ def convert_to_mmseqs():
 # =============================================================================
 # STATUS CHECK
 # =============================================================================
+
 
 @app.function(
     image=download_image,
@@ -760,6 +874,7 @@ def check_status():
 # =============================================================================
 # MAIN ENTRYPOINT
 # =============================================================================
+
 
 @app.local_entrypoint()
 def main(

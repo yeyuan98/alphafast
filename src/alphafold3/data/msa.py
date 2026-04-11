@@ -300,6 +300,7 @@ def get_msa_tool(
                 gpu_enabled=msa_tool_config.gpu_enabled,
                 gpu_device=msa_tool_config.gpu_device,
                 threads=msa_tool_config.threads,
+                temp_dir=msa_tool_config.temp_dir,
                 search_type=msa_tool_config.search_type,
             )
         case msa_config.NhmmerConfig():
@@ -393,6 +394,7 @@ def get_msa_pipelined(
         gpu_enabled=run_config.config.gpu_enabled,
         gpu_device=run_config.config.gpu_device,
         threads=run_config.config.threads,
+        temp_dir=run_config.config.temp_dir,
         search_type=run_config.config.search_type,
     )
 
@@ -462,6 +464,7 @@ def get_msa_shared_db_pipelined(
             gpu_enabled=run_config.config.gpu_enabled,
             gpu_device=run_config.config.gpu_device,
             threads=run_config.config.threads,
+            temp_dir=run_config.config.temp_dir,
             search_type=run_config.config.search_type,
         )
 

@@ -1027,5 +1027,6 @@ def run_mmseqs_template_search(
         gpu_enabled=mmseqs_config.gpu_enabled,
         gpu_device=mmseqs_config.gpu_device,
         threads=mmseqs_config.threads,
+        temp_dir=mmseqs_config.temp_dir,
     )
     return searcher.query(query_sequence)

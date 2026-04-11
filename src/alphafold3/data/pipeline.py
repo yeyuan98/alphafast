@@ -430,6 +430,7 @@ class DataPipeline:
                 gpu_enabled=data_pipeline_config.use_mmseqs_gpu,
                 gpu_device=data_pipeline_config.gpu_device,
                 threads=data_pipeline_config.mmseqs_n_threads,
+                temp_dir=data_pipeline_config.temp_dir,
             ),
             chain_poly_type=mmcif_names.PROTEIN_CHAIN,
             crop_size=None,
@@ -447,6 +448,7 @@ class DataPipeline:
                 gpu_enabled=data_pipeline_config.use_mmseqs_gpu,
                 gpu_device=data_pipeline_config.gpu_device,
                 threads=data_pipeline_config.mmseqs_n_threads,
+                temp_dir=data_pipeline_config.temp_dir,
             ),
             chain_poly_type=mmcif_names.PROTEIN_CHAIN,
             crop_size=None,
@@ -464,6 +466,7 @@ class DataPipeline:
                 gpu_enabled=data_pipeline_config.use_mmseqs_gpu,
                 gpu_device=data_pipeline_config.gpu_device,
                 threads=data_pipeline_config.mmseqs_n_threads,
+                temp_dir=data_pipeline_config.temp_dir,
             ),
             chain_poly_type=mmcif_names.PROTEIN_CHAIN,
             crop_size=None,
@@ -481,6 +484,7 @@ class DataPipeline:
                 gpu_enabled=data_pipeline_config.use_mmseqs_gpu,
                 gpu_device=data_pipeline_config.gpu_device,
                 threads=data_pipeline_config.mmseqs_n_threads,
+                temp_dir=data_pipeline_config.temp_dir,
             ),
             chain_poly_type=mmcif_names.PROTEIN_CHAIN,
             crop_size=None,
@@ -525,6 +529,7 @@ class DataPipeline:
                         gpu_enabled=data_pipeline_config.use_mmseqs_gpu,
                         gpu_device=data_pipeline_config.gpu_device,
                         threads=data_pipeline_config.mmseqs_n_threads,
+                        temp_dir=data_pipeline_config.temp_dir,
                     ),
                 ),
                 filter_config=template_filter_config,
@@ -665,9 +670,7 @@ class DataPipeline:
             mode=internal_mode,
         )
 
-    def _setup_nhmmer_config(
-        self, data_pipeline_config: DataPipelineConfig
-    ) -> None:
+    def _setup_nhmmer_config(self, data_pipeline_config: DataPipelineConfig) -> None:
         """Sets up nhmmer RunConfigs for RNA MSA search.
 
         Checks if HMMER binaries are provided. If so, creates RunConfigs for
@@ -696,9 +699,21 @@ class DataPipeline:
             # RNA databases — order matters for merge: Rfam, RNAcentral, NT-RNA
             # (matches original AF3 merge order)
             rna_dbs = [
-                ("rfam_rna", data_pipeline_config.rfam_database_path, data_pipeline_config.rfam_z_value),
-                ("rna_central_rna", data_pipeline_config.rnacentral_database_path, data_pipeline_config.rnacentral_z_value),
-                ("nt_rna", data_pipeline_config.nt_database_path, data_pipeline_config.nt_z_value),
+                (
+                    "rfam_rna",
+                    data_pipeline_config.rfam_database_path,
+                    data_pipeline_config.rfam_z_value,
+                ),
+                (
+                    "rna_central_rna",
+                    data_pipeline_config.rnacentral_database_path,
+                    data_pipeline_config.rnacentral_z_value,
+                ),
+                (
+                    "nt_rna",
+                    data_pipeline_config.nt_database_path,
+                    data_pipeline_config.nt_z_value,
+                ),
             ]
             for db_name, db_path, z_value in rna_dbs:
                 if db_path:
@@ -709,7 +724,8 @@ class DataPipeline:
                                 hmmalign_binary_path=hmmalign_bin,
                                 hmmbuild_binary_path=hmmbuild_bin,
                                 database_config=msa_config.DatabaseConfig(
-                                    name=db_name, path=db_path,
+                                    name=db_name,
+                                    path=db_path,
                                 ),
                                 n_cpu=n_cpu,
                                 e_value=1e-3,
@@ -729,6 +745,7 @@ class DataPipeline:
             mmseqs_binary = data_pipeline_config.mmseqs_binary_path
             if not mmseqs_binary:
                 from alphafold3.data.tools import mmseqs as mmseqs_module
+
                 mmseqs_binary = mmseqs_module.find_mmseqs_binary()
 
             if mmseqs_binary:
@@ -749,6 +766,7 @@ class DataPipeline:
                 ]
                 for db_name, db_prefix in mmseqs_rna_dbs:
                     from alphafold3.data.tools import mmseqs as mmseqs_module
+
                     db_path = mmseqs_module.check_mmseqs_database(
                         rna_mmseqs_db_dir, db_prefix
                     )
@@ -758,13 +776,15 @@ class DataPipeline:
                                 config=msa_config.MmseqsConfig(
                                     binary_path=mmseqs_binary,
                                     database_config=msa_config.DatabaseConfig(
-                                        name=db_name, path=db_path,
+                                        name=db_name,
+                                        path=db_path,
                                     ),
                                     e_value=1e-3,
                                     sensitivity=7.5,
                                     max_sequences=max_sequences,
                                     gpu_enabled=False,  # No GPU for nucleotide
                                     threads=16,
+                                    temp_dir=data_pipeline_config.temp_dir,
                                     search_type=3,  # Nucleotide search
                                 ),
                                 chain_poly_type=mmcif_names.RNA_CHAIN,
@@ -773,7 +793,8 @@ class DataPipeline:
                         )
                         logging.info(
                             "Added MMseqs2 nucleotide database: %s (%s)",
-                            db_name, db_path,
+                            db_name,
+                            db_path,
                         )
 
         if self._rna_msa_configs:
@@ -843,6 +864,7 @@ class DataPipeline:
                 max_sequences=cfg.max_sequences,
                 gpu_enabled=False,
                 threads=cfg.threads,
+                temp_dir=self._temp_dir,
                 search_type=cfg.search_type,
             )
             logging.info(
@@ -879,7 +901,8 @@ class DataPipeline:
 
             if db_msas:
                 merged = msa.Msa.from_multiple_msas(
-                    msas=db_msas, deduplicate=True,
+                    msas=db_msas,
+                    deduplicate=True,
                 )
                 merged_a3m[seq] = merged.to_a3m()
             else:
@@ -1252,12 +1275,14 @@ class DataPipeline:
         """
         if chain.unpaired_msa is not None:
             logging.info(
-                "Using provided MSA for RNA chain %s.", chain.id,
+                "Using provided MSA for RNA chain %s.",
+                chain.id,
             )
             unpaired_msa = chain.unpaired_msa
         elif self._nhmmer_enabled and self._rna_msa_configs:
             logging.info(
-                "Running nhmmer RNA MSA search for chain %s.", chain.id,
+                "Running nhmmer RNA MSA search for chain %s.",
+                chain.id,
             )
             unpaired_msa = self._run_nhmmer_search(
                 sequence=chain.sequence,
@@ -1267,7 +1292,8 @@ class DataPipeline:
         else:
             logging.warning(
                 "RNA MSA search is not configured (requires HMMER). "
-                "Using empty MSA for RNA chain %s.", chain.id,
+                "Using empty MSA for RNA chain %s.",
+                chain.id,
             )
             unpaired_msa = msa.Msa.from_empty(
                 query_sequence=chain.sequence, chain_poly_type=mmcif_names.RNA_CHAIN
@@ -1316,7 +1342,8 @@ class DataPipeline:
                     chain.id,
                 )
                 rna_futures[idx] = rna_executor.submit(
-                    self.process_rna_chain, chain,
+                    self.process_rna_chain,
+                    chain,
                 )
 
         # Process protein chains (GPU-bound, runs while RNA threads work).
@@ -1351,7 +1378,8 @@ class DataPipeline:
             if isinstance(chain, folding_input.DnaChain):
                 logging.info(
                     "DNA chain %s: using empty MSA (no search), matching "
-                    "AlphaFold 3 behavior.", chain.id,
+                    "AlphaFold 3 behavior.",
+                    chain.id,
                 )
             processed_chains[idx] = chain
 
@@ -1359,7 +1387,8 @@ class DataPipeline:
         ordered_chains = [processed_chains[i] for i in range(len(fold_input.chains))]
 
         logging.info(
-            "process() completed in %.2f seconds", time.time() - process_start,
+            "process() completed in %.2f seconds",
+            time.time() - process_start,
         )
         return dataclasses.replace(fold_input, chains=ordered_chains)
 
@@ -1516,6 +1545,7 @@ class DataPipeline:
             gpu_enabled=mmseqs_cfg.gpu_enabled,
             gpu_device=mmseqs_cfg.gpu_device,
             threads=mmseqs_cfg.threads,
+            temp_dir=self._temp_dir,
         )
 
         logging.info("Running batch MSA search across all databases...")
@@ -1596,7 +1626,9 @@ class DataPipeline:
 
             for chain in fold_input.chains:
                 process_chain_start_time = time.time()
-                logging.info("Processing chain %s from fold input %d...", chain.id, fold_idx)
+                logging.info(
+                    "Processing chain %s from fold input %d...", chain.id, fold_idx
+                )
 
                 if isinstance(chain, folding_input.ProteinChain):
                     if chain.unpaired_msa is None and chain.paired_msa is None:

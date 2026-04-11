@@ -42,7 +42,7 @@ HPC filesystems vary in performance characteristics. The data pipeline writes ma
 
 ### Bind Mounts
 
-Singularity requires explicit bind mounts for directories outside the container. The `run_alphafast.sh` script handles this automatically for `--db_dir`, `--weights_dir`, `--input_dir`, `--output_dir`, and `--jax_compilation_cache_dir`. If you need to pass additional paths, you may need to add bind mounts manually or ensure the paths are under an already-bound parent directory.
+Singularity requires explicit bind mounts for directories outside the container. The `run_alphafast.sh` script handles this automatically for `--db_dir`, `--weights_dir`, `--input_dir`, `--output_dir`, `--temp_dir`, and `--jax_compilation_cache_dir`. If you need to pass additional paths, you may need to add bind mounts manually or ensure the paths are under an already-bound parent directory.
 
 ## CUDA Driver Compatibility
 
@@ -82,12 +82,14 @@ CONTAINER=/path/to/alphafast.sif
 
 # Use local scratch for temporary files (recommended)
 export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
+mkdir -p /scratch/$USER/alphafast_tmp /scratch/$USER/alphafast_jax_cache
 
 ./scripts/run_alphafast.sh \
     --input_dir $INPUT_DIR \
     --output_dir $OUTPUT_DIR \
     --db_dir $DB_DIR \
     --weights_dir $WEIGHTS_DIR \
+    --temp_dir /scratch/$USER/alphafast_tmp \
     --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --container $CONTAINER
 ```
@@ -116,6 +118,7 @@ CONTAINER=/path/to/alphafast.sif
 
 # Use local scratch for temporary files (recommended)
 export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
+mkdir -p /scratch/$USER/alphafast_tmp /scratch/$USER/alphafast_jax_cache
 
 ./scripts/run_alphafast.sh \
     --input_dir $INPUT_DIR \
@@ -123,6 +126,7 @@ export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
     --db_dir $DB_DIR \
     --weights_dir $WEIGHTS_DIR \
     --container $CONTAINER \
+    --temp_dir /scratch/$USER/alphafast_tmp \
     --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --gpu_devices 0,1,2,3
 ```

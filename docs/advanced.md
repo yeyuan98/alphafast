@@ -75,6 +75,8 @@ python run_data_pipeline.py \
 
 Typical space usage: 1-5 GB per batch. The directory is cleaned up automatically after each run.
 
+The same `--temp_dir` flag is supported by `scripts/run_alphafast.sh`; it is bind-mounted into Docker or Singularity automatically and applies to both single-GPU and multi-GPU MSA runs.
+
 ## GPU Device Selection
 
 The `--gpu_device` flag selects which GPU to use (zero-indexed). This is useful on multi-GPU systems when you want to pin a run to a specific device:

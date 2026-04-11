@@ -47,6 +47,8 @@ RNA_MMSEQS_DB_DIR=""
 USE_NHMMER=""
 JAX_COMPILATION_CACHE_DIR=""
 JAX_CACHE_CONTAINER_DIR="/data/jax_cache"
+TEMP_DIR=""
+TEMP_DIR_CONTAINER="/data/temp_dir"
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -71,6 +73,9 @@ usage() {
     echo "                        (default: romerolabduke/alphafast:latest)"
     echo "  --batch_size N        MSA batch size (default: auto = number of inputs)"
     echo "  --backend TYPE        Force 'docker' or 'singularity' (default: auto-detect)"
+    echo "  --temp_dir DIR        Directory for MMseqs temporary files."
+    echo "                        Recommended on HPC: point this to fast local scratch"
+    echo "                        such as /scratch or /tmp on the compute node."
     echo "  --rna_mmseqs_db_dir DIR  Override RNA MMseqs2 database directory."
     echo "                        By default, AlphaFast auto-detects <db_dir>/mmseqs_rna"
     echo "                        and uses MMseqs2 nucleotide search for RNA MSA."
@@ -94,6 +99,7 @@ while [ "$#" -gt 0 ]; do
         --batch_size)   BATCH_SIZE="$2"; shift 2 ;;
         --gpu_devices)  GPU_DEVICES="$2"; shift 2 ;;
         --backend)      BACKEND="$2"; shift 2 ;;
+        --temp_dir)     TEMP_DIR="$2"; shift 2 ;;
         --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
         --use_nhmmer)   USE_NHMMER="true"; shift ;;
         --jax_compilation_cache_dir) JAX_COMPILATION_CACHE_DIR="$2"; shift 2 ;;
@@ -155,6 +161,11 @@ if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
     JAX_COMPILATION_CACHE_DIR="$(cd "$JAX_COMPILATION_CACHE_DIR" && pwd)"
 fi
 
+if [ -n "$TEMP_DIR" ]; then
+    mkdir -p "$TEMP_DIR"
+    TEMP_DIR="$(cd "$TEMP_DIR" && pwd)"
+fi
+
 # Auto batch size: count input JSON files
 if [ -z "$BATCH_SIZE" ]; then
     BATCH_SIZE=$(find "$INPUT_DIR" -maxdepth 1 -name "*.json" -type f | wc -l | tr -d ' ')
@@ -193,6 +204,11 @@ echo "Output dir: $OUTPUT_DIR"
 echo "DB dir:     $DB_DIR"
 echo "MMseqs dir: $MMSEQS_DB_DIR"
 echo "Weights:    $WEIGHTS_DIR"
+if [ -n "$TEMP_DIR" ]; then
+    echo "Temp dir:   $TEMP_DIR"
+else
+    echo "Temp dir:   system default"
+fi
 if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
     echo "JAX cache:  $JAX_COMPILATION_CACHE_DIR"
 else
@@ -237,6 +253,15 @@ run_container() {
         )
         singularity_extra_args+=(
             --bind "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
+    fi
+
+    if [ -n "$TEMP_DIR" ]; then
+        docker_extra_args+=(
+            -v "${TEMP_DIR}:${TEMP_DIR_CONTAINER}"
+        )
+        singularity_extra_args+=(
+            --bind "${TEMP_DIR}:${TEMP_DIR_CONTAINER}"
         )
     fi
 
@@ -306,6 +331,7 @@ if [ "$NUM_GPUS" -eq 1 ]; then
         --mmseqs_db_dir=/data/mmseqs_databases \
         --use_mmseqs_gpu \
         --batch_size="$BATCH_SIZE" \
+        ${TEMP_DIR:+--temp_dir=${TEMP_DIR_CONTAINER}} \
         $RNA_FLAGS \
         2>&1 | tee "$PIPELINE_LOG"
 
@@ -372,6 +398,18 @@ else
         )
         SINGULARITY_EXTRA_ARGS+=(
             --bind "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
+    fi
+    if [ -n "$TEMP_DIR" ]; then
+        DOCKER_EXTRA_ARGS+=(
+            -e "TEMP_DIR=${TEMP_DIR_CONTAINER}"
+            -v "${TEMP_DIR}:${TEMP_DIR_CONTAINER}"
+        )
+        SINGULARITY_ENV_ARGS+=(
+            "SINGULARITYENV_TEMP_DIR=${TEMP_DIR_CONTAINER}"
+        )
+        SINGULARITY_EXTRA_ARGS+=(
+            --bind "${TEMP_DIR}:${TEMP_DIR_CONTAINER}"
         )
     fi
 

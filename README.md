@@ -149,6 +149,8 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --weights_dir /path/to/weights
 ```
 
+On HPC systems with slow shared storage, add `--temp_dir /scratch/$USER/alphafast_tmp` to place MMseqs temporary files on fast node-local storage.
+
 **Multi-GPU:**
 
 ```bash
@@ -264,6 +266,7 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --output_dir /path/to/outputs \
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
+    --temp_dir /scratch/$USER/alphafast_tmp \
     --container /path/to/alphafast.sif \
     --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --gpu_devices 0,1,2,3

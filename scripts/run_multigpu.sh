@@ -53,6 +53,7 @@ MMSEQS_THREADS="${7:-}"
 export DB_DIR="${DB_DIR:-/data/public_databases}"
 export MMSEQS_DB_DIR="${MMSEQS_DB_DIR:-/data/mmseqs_databases}"
 export MODEL_DIR="${MODEL_DIR:-/data/models}"
+export TEMP_DIR="${TEMP_DIR:-}"
 
 # RNA search configuration: auto-detect mmseqs_rna/ unless USE_NHMMER is set.
 export USE_NHMMER="${USE_NHMMER:-}"
@@ -114,6 +115,7 @@ echo "AF output dir: ${AF_OUTPUT_DIR}"
 echo "Num GPUs: ${NUM_GPUS}"
 echo "GPU list: ${GPU_LIST}"
 echo "Threads per GPU: ${MMSEQS_THREADS}"
+echo "Temp dir: ${TEMP_DIR:-system default}"
 echo "CUDA_VISIBLE_DEVICES (initial): ${CUDA_VISIBLE_DEVICES:-<unset>}"
 if command -v nvidia-smi >/dev/null 2>&1; then
   echo "Visible GPUs inside container:"

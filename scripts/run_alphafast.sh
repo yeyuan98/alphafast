@@ -45,6 +45,8 @@ GPU_DEVICES=""
 BACKEND=""
 RNA_MMSEQS_DB_DIR=""
 USE_NHMMER=""
+JAX_COMPILATION_CACHE_DIR=""
+JAX_CACHE_CONTAINER_DIR="/data/jax_cache"
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -75,6 +77,9 @@ usage() {
     echo "  --use_nhmmer          Force nhmmer for RNA MSA search instead of RNA MMseqs2."
     echo "                        Requires RNA FASTA fallback files, e.g. created with"
     echo "                        setup_databases.sh --include-nhmmer."
+    echo "  --jax_compilation_cache_dir DIR"
+    echo "                        Persistent JAX compilation cache directory to reuse"
+    echo "                        compiled inference executables across runs."
     exit 1
 }
 
@@ -91,6 +96,7 @@ while [ "$#" -gt 0 ]; do
         --backend)      BACKEND="$2"; shift 2 ;;
         --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
         --use_nhmmer)   USE_NHMMER="true"; shift ;;
+        --jax_compilation_cache_dir) JAX_COMPILATION_CACHE_DIR="$2"; shift 2 ;;
         --help|-h)      usage ;;
         *)              echo "Unknown argument: $1"; usage ;;
     esac
@@ -144,6 +150,11 @@ DB_DIR="$(cd "$DB_DIR" && pwd)"
 WEIGHTS_DIR="$(cd "$WEIGHTS_DIR" && pwd)"
 MMSEQS_DB_DIR="${DB_DIR}/mmseqs"
 
+if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
+    mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+    JAX_COMPILATION_CACHE_DIR="$(cd "$JAX_COMPILATION_CACHE_DIR" && pwd)"
+fi
+
 # Auto batch size: count input JSON files
 if [ -z "$BATCH_SIZE" ]; then
     BATCH_SIZE=$(find "$INPUT_DIR" -maxdepth 1 -name "*.json" -type f | wc -l | tr -d ' ')
@@ -182,6 +193,11 @@ echo "Output dir: $OUTPUT_DIR"
 echo "DB dir:     $DB_DIR"
 echo "MMseqs dir: $MMSEQS_DB_DIR"
 echo "Weights:    $WEIGHTS_DIR"
+if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
+    echo "JAX cache:  $JAX_COMPILATION_CACHE_DIR"
+else
+    echo "JAX cache:  disabled"
+fi
 echo "GPUs:       $NUM_GPUS (devices: $GPU_DEVICES)"
 echo "Batch size: $BATCH_SIZE"
 echo "Start time: $(date)"
@@ -195,12 +211,33 @@ run_container() {
     local gpu_spec="$1"
     shift
 
-    # Optional RNA MMseqs2 database mount
-    local rna_mount_docker=""
-    local rna_mount_singularity=""
+    local -a docker_extra_args=()
+    local -a singularity_extra_args=()
+    local -a singularity_env_args=(
+        "SINGULARITYENV_CUDA_VISIBLE_DEVICES=${gpu_spec}"
+    )
+
+    # Optional RNA MMseqs2 database mount.
     if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
-        rna_mount_docker="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
-        rna_mount_singularity="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        docker_extra_args+=(
+            -v "${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        )
+        singularity_extra_args+=(
+            --bind "${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        )
+    fi
+
+    if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
+        docker_extra_args+=(
+            -e "JAX_COMPILATION_CACHE_DIR=${JAX_CACHE_CONTAINER_DIR}"
+            -v "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
+        singularity_env_args+=(
+            "SINGULARITYENV_JAX_COMPILATION_CACHE_DIR=${JAX_CACHE_CONTAINER_DIR}"
+        )
+        singularity_extra_args+=(
+            --bind "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
     fi
 
     if [ "$BACKEND" = "docker" ]; then
@@ -212,20 +249,20 @@ run_container() {
             -v "${WEIGHTS_DIR}:/data/models" \
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${OUTPUT_DIR}:/data/af_output" \
-            $rna_mount_docker \
+            "${docker_extra_args[@]}" \
             "$CONTAINER" \
             "$@"
     elif [ "$BACKEND" = "singularity" ]; then
-        SINGULARITYENV_CUDA_VISIBLE_DEVICES="$gpu_spec" \
-        singularity exec --nv \
-            --bind "${DB_DIR}:/data/public_databases" \
-            --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
-            --bind "${WEIGHTS_DIR}:/data/models" \
-            --bind "${INPUT_DIR}:/data/af_input" \
-            --bind "${OUTPUT_DIR}:/data/af_output" \
-            $rna_mount_singularity \
-            "$CONTAINER" \
-            "$@"
+        env "${singularity_env_args[@]}" \
+            singularity exec --nv \
+                --bind "${DB_DIR}:/data/public_databases" \
+                --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
+                --bind "${WEIGHTS_DIR}:/data/models" \
+                --bind "${INPUT_DIR}:/data/af_input" \
+                --bind "${OUTPUT_DIR}:/data/af_output" \
+                "${singularity_extra_args[@]}" \
+                "$CONTAINER" \
+                "$@"
     fi
 }
 
@@ -285,6 +322,7 @@ if [ "$NUM_GPUS" -eq 1 ]; then
         --norun_data_pipeline \
         --output_dir=/data/af_output \
         --force_output_dir \
+        ${JAX_COMPILATION_CACHE_DIR:+--jax_compilation_cache_dir=${JAX_CACHE_CONTAINER_DIR}} \
         2>&1 | tee "$INFERENCE_LOG"
 
 # ---------------------------------------------------------------------------
@@ -308,12 +346,33 @@ else
         MULTIGPU_RNA_DB_DIR="/data/public_databases/mmseqs_rna"
     fi
 
-    # Optional RNA MMseqs2 mount
-    RNA_DOCKER_MOUNT=""
-    RNA_SINGULARITY_BIND=""
+    # Optional RNA MMseqs2 and JAX cache mounts.
+    DOCKER_EXTRA_ARGS=()
+    SINGULARITY_EXTRA_ARGS=()
+    SINGULARITY_ENV_ARGS=(
+        "SINGULARITYENV_CUDA_VISIBLE_DEVICES=${GPU_DEVICES}"
+        "SINGULARITYENV_RNA_MMSEQS_DB_DIR=${MULTIGPU_RNA_DB_DIR}"
+        "SINGULARITYENV_USE_NHMMER=${USE_NHMMER}"
+    )
     if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
-        RNA_DOCKER_MOUNT="-v ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
-        RNA_SINGULARITY_BIND="--bind ${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        DOCKER_EXTRA_ARGS+=(
+            -v "${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        )
+        SINGULARITY_EXTRA_ARGS+=(
+            --bind "${RNA_MMSEQS_DB_DIR}:/data/rna_mmseqs_databases:ro"
+        )
+    fi
+    if [ -n "$JAX_COMPILATION_CACHE_DIR" ]; then
+        DOCKER_EXTRA_ARGS+=(
+            -e "JAX_COMPILATION_CACHE_DIR=${JAX_CACHE_CONTAINER_DIR}"
+            -v "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
+        SINGULARITY_ENV_ARGS+=(
+            "SINGULARITYENV_JAX_COMPILATION_CACHE_DIR=${JAX_CACHE_CONTAINER_DIR}"
+        )
+        SINGULARITY_EXTRA_ARGS+=(
+            --bind "${JAX_COMPILATION_CACHE_DIR}:${JAX_CACHE_CONTAINER_DIR}"
+        )
     fi
 
     # Inside the container, CUDA_VISIBLE_DEVICES remaps physical device IDs
@@ -334,27 +393,25 @@ else
             -v "${INPUT_DIR}:/data/af_input" \
             -v "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
             -v "${OUTPUT_DIR}:/data/af_output" \
-            $RNA_DOCKER_MOUNT \
+            "${DOCKER_EXTRA_ARGS[@]}" \
             "$CONTAINER" \
             bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
                 /data/af_input /data/af_msa_output /data/af_output \
                 $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     elif [ "$BACKEND" = "singularity" ]; then
-        SINGULARITYENV_CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
-        SINGULARITYENV_RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
-        SINGULARITYENV_USE_NHMMER="${USE_NHMMER}" \
-        singularity exec --nv \
-            --bind "${DB_DIR}:/data/public_databases" \
-            --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
-            --bind "${WEIGHTS_DIR}:/data/models" \
-            --bind "${INPUT_DIR}:/data/af_input" \
-            --bind "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
-            --bind "${OUTPUT_DIR}:/data/af_output" \
-            $RNA_SINGULARITY_BIND \
-            "$CONTAINER" \
-            bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
-                /data/af_input /data/af_msa_output /data/af_output \
-                $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
+        env "${SINGULARITY_ENV_ARGS[@]}" \
+            singularity exec --nv \
+                --bind "${DB_DIR}:/data/public_databases" \
+                --bind "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
+                --bind "${WEIGHTS_DIR}:/data/models" \
+                --bind "${INPUT_DIR}:/data/af_input" \
+                --bind "${MSA_OUTPUT_DIR}:/data/af_msa_output" \
+                --bind "${OUTPUT_DIR}:/data/af_output" \
+                "${SINGULARITY_EXTRA_ARGS[@]}" \
+                "$CONTAINER" \
+                bash -lc "cd /app/alphafold && ./scripts/run_multigpu.sh \
+                    /data/af_input /data/af_msa_output /data/af_output \
+                    $NUM_GPUS $BATCH_SIZE $LOGICAL_GPU_LIST"
     fi
 fi
 

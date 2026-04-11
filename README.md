@@ -157,8 +157,11 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --output_dir /path/to/outputs \
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
+    --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --gpu_devices 0,1,2,3
 ```
+
+Use `--jax_compilation_cache_dir` to persist JAX/XLA compilations across runs. This reduces repeated cold-start compile time, especially for repeated inference-only batches on the same GPU model.
 
 **Force nhmmer for RNA:**
 
@@ -262,8 +265,11 @@ Create a directory of input `.json` files. See [docs/input_format.md](docs/input
     --db_dir /path/to/databases \
     --weights_dir /path/to/weights \
     --container /path/to/alphafast.sif \
+    --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --gpu_devices 0,1,2,3
 ```
+
+For best results on repeated multi-GPU runs, place the JAX cache on fast node-local or high-performance shared storage. A fully cold cache can still cause the first parallel wave to compile once per worker process before later runs benefit from the persisted artifacts.
 
 ---
 

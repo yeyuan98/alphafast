@@ -21,6 +21,7 @@ if received directly from Google. Use is subject to terms of use available at
 https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md
 """
 
+import ast
 from collections.abc import Sequence
 import datetime
 import json
@@ -490,6 +491,16 @@ _WRITE_TIMING_JSON = flags.DEFINE_bool(
     " {output_dir}/inference_timing.jsonl. Each line contains the input name,"
     " inference time in seconds, and status.",
 )
+_HEAD_TO_TAIL = flags.DEFINE_bool(
+    "head_to_tail",
+    False,
+    "Whether to enable head-to-tail cyclization for cyclic peptides.",
+)
+_DISULFIDE_CHAIN_RES = flags.DEFINE_string(
+    "disulfide_chain_res",
+    "",
+    "Disulfide bond positions, format: [[chain_id, res_i, res_j, ...]].",
+)
 
 
 def replace_db_dir(path_with_db_dir: str, db_dirs: Sequence[str]) -> str:
@@ -572,6 +583,12 @@ def main(_):
                         " https://developer.nvidia.com/cuda-gpus) the"
                         ' --flash_attention_implementation must be set to "xla".'
                     )
+
+    list_cid_ss = (
+        ast.literal_eval(_DISULFIDE_CHAIN_RES.value)
+        if _DISULFIDE_CHAIN_RES.value
+        else []
+    )
 
     notice = textwrap.wrap(
         "Running AlphaFold 3. Please note that standard AlphaFold 3 model"
@@ -731,6 +748,8 @@ def main(_):
                     conformer_max_iterations=_CONFORMER_MAX_ITERATIONS.value,
                     resolve_msa_overlaps=_RESOLVE_MSA_OVERLAPS.value,
                     force_output_dir=_FORCE_OUTPUT_DIR.value,
+                    head_to_tail=_HEAD_TO_TAIL.value,
+                    list_cid_ss=list_cid_ss,
                 )
                 processed_fold_inputs.append((processed_input, output_dir))
 
@@ -809,6 +828,8 @@ def main(_):
                     conformer_max_iterations=_CONFORMER_MAX_ITERATIONS.value,
                     resolve_msa_overlaps=_RESOLVE_MSA_OVERLAPS.value,
                     force_output_dir=True,  # Reuse same output dir from data pipeline
+                    head_to_tail=_HEAD_TO_TAIL.value,
+                    list_cid_ss=list_cid_ss,
                 )
             except Exception as e:
                 status = "failed"

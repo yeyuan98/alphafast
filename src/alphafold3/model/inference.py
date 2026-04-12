@@ -180,6 +180,8 @@ def predict_structure(
     ref_max_modified_date: datetime.date | None = None,
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
+    head_to_tail: bool = False,
+    list_cid_ss: list[list] = [],
 ) -> Sequence[ResultsForSeed]:
     """Runs the full inference pipeline to predict structures for each seed."""
 
@@ -194,6 +196,8 @@ def predict_structure(
         ref_max_modified_date=ref_max_modified_date,
         conformer_max_iterations=conformer_max_iterations,
         resolve_msa_overlaps=resolve_msa_overlaps,
+        head_to_tail=head_to_tail,
+        list_cid_ss=list_cid_ss,
     )
     print(
         f"Featurising data with {len(fold_input.rng_seeds)} seed(s) took"
@@ -336,6 +340,8 @@ def process_fold_input(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     force_output_dir: bool = False,
+    head_to_tail: bool = False,
+    list_cid_ss: list[list] = [],
 ) -> folding_input.Input: ...
 
 
@@ -350,6 +356,8 @@ def process_fold_input(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     force_output_dir: bool = False,
+    head_to_tail: bool = False,
+    list_cid_ss: list[list] = [],
 ) -> Sequence[ResultsForSeed]: ...
 
 
@@ -363,6 +371,8 @@ def process_fold_input(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     force_output_dir: bool = False,
+    head_to_tail: bool = False,
+    list_cid_ss: list[list] = [],
 ) -> folding_input.Input | Sequence[ResultsForSeed]:
     """Runs data pipeline and/or inference on a single fold input.
 
@@ -439,6 +449,8 @@ def process_fold_input(
             ref_max_modified_date=ref_max_modified_date,
             conformer_max_iterations=conformer_max_iterations,
             resolve_msa_overlaps=resolve_msa_overlaps,
+            head_to_tail=head_to_tail,
+            list_cid_ss=list_cid_ss,
         )
         print(f"Writing outputs with {len(fold_input.rng_seeds)} seed(s)...")
         write_outputs(

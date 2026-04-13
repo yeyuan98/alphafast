@@ -11,7 +11,7 @@
 # parallel (Phase 2). This provides clean timing separation for benchmarking
 # while achieving near-perfect linear scaling.
 #
-# Usage (inside container):
+# Usage (inside container, called by run_alphafast.sh):
 #   scripts/run_multigpu.sh <input_dir> <msa_output_dir> <af_output_dir> \
 #       <num_gpus> [batch_size] [gpu_list] [mmseqs_threads]
 #
@@ -19,9 +19,9 @@
 #   input_dir       - Directory containing input JSON files
 #   msa_output_dir  - Output directory for MSA JSONs
 #   af_output_dir   - Output directory for inference outputs
-#   num_gpus        - Number of GPUs to use
+#   num_gpus        - Number of GPUs (derived from gpu_list by caller)
 #   batch_size      - Batch size per GPU for MSA (default: 512)
-#   gpu_list        - Comma-separated GPU indices (default: 0,1,...,N-1)
+#   gpu_list        - Comma-separated GPU device indices (e.g. "6,7")
 #   mmseqs_threads  - CPU threads per GPU (default: total_cores / num_gpus)
 
 set -euo pipefail
@@ -53,6 +53,17 @@ MMSEQS_THREADS="${7:-}"
 export DB_DIR="${DB_DIR:-/data/public_databases}"
 export MMSEQS_DB_DIR="${MMSEQS_DB_DIR:-/data/mmseqs_databases}"
 export MODEL_DIR="${MODEL_DIR:-/data/models}"
+export TEMP_DIR="${TEMP_DIR:-}"
+
+# RNA search configuration: auto-detect mmseqs_rna/ unless USE_NHMMER is set.
+export USE_NHMMER="${USE_NHMMER:-}"
+export RNA_MMSEQS_DB_DIR="${RNA_MMSEQS_DB_DIR:-}"
+if [ -z "$USE_NHMMER" ] && [ -z "$RNA_MMSEQS_DB_DIR" ]; then
+    if [ -d "${DB_DIR}/mmseqs_rna" ] && [ -f "${DB_DIR}/mmseqs_rna/rfam.dbtype" ]; then
+        RNA_MMSEQS_DB_DIR="${DB_DIR}/mmseqs_rna"
+        echo "Auto-detected RNA MMseqs2 databases at ${RNA_MMSEQS_DB_DIR}"
+    fi
+fi
 export LOG_DIR="${LOG_DIR:-${AF_OUTPUT_DIR}/logs}"
 RUN_DATA_PIPELINE_PATH="${RUN_DATA_PIPELINE_PATH:-/app/alphafold/run_data_pipeline.py}"
 RUN_ALPHAFOLD_PATH="${RUN_ALPHAFOLD_PATH:-/app/alphafold/run_alphafold.py}"
@@ -104,6 +115,7 @@ echo "AF output dir: ${AF_OUTPUT_DIR}"
 echo "Num GPUs: ${NUM_GPUS}"
 echo "GPU list: ${GPU_LIST}"
 echo "Threads per GPU: ${MMSEQS_THREADS}"
+echo "Temp dir: ${TEMP_DIR:-system default}"
 echo "CUDA_VISIBLE_DEVICES (initial): ${CUDA_VISIBLE_DEVICES:-<unset>}"
 if command -v nvidia-smi >/dev/null 2>&1; then
   echo "Visible GPUs inside container:"
@@ -115,6 +127,10 @@ echo "=========================================="
 START_TIME=$(date +%s)
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_LIST"
+
+# GPU_ARRAY is the authoritative source for how many GPUs to use.
+# Override NUM_GPUS if it disagrees with the actual device list.
+NUM_GPUS="${#GPU_ARRAY[@]}"
 
 # Cap GPU count when there are fewer inputs than GPUs
 if [ "$TOTAL_INPUTS" -lt "$NUM_GPUS" ]; then
@@ -162,6 +178,16 @@ for ((i=0; i<NUM_GPUS; i++)); do
 
   echo "  Starting MSA on GPU ${GPU_IDX} (${PART_COUNT} inputs, batch_size=${GPU_BATCH_SIZE})"
 
+  # Build RNA flags for this GPU
+  RNA_GPU_FLAGS=""
+  if [ -n "$USE_NHMMER" ]; then
+    RNA_GPU_FLAGS="--use_nhmmer --nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
+  elif [ -n "$RNA_MMSEQS_DB_DIR" ]; then
+    RNA_GPU_FLAGS="--rna_mmseqs_db_dir=$RNA_MMSEQS_DB_DIR"
+  else
+    RNA_GPU_FLAGS="--nhmmer_binary_path=/hmmer/bin/nhmmer --hmmalign_binary_path=/hmmer/bin/hmmalign --hmmbuild_binary_path=/hmmer/bin/hmmbuild"
+  fi
+
   CUDA_VISIBLE_DEVICES="${VISIBLE_GPU}" \
     python "$RUN_DATA_PIPELINE_PATH" \
     --input_dir="$PARTITION_DIR" \
@@ -172,6 +198,7 @@ for ((i=0; i<NUM_GPUS; i++)); do
     --mmseqs_n_threads="$MMSEQS_THREADS" \
     --batch_size="$GPU_BATCH_SIZE" \
     ${TEMP_DIR:+--temp_dir="$TEMP_DIR"} \
+    $RNA_GPU_FLAGS \
     > "$MSA_LOG" 2>&1 &
   MSA_PIDS+=("$!")
   MSA_LOGS+=("$MSA_LOG")

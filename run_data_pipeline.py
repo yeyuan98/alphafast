@@ -137,13 +137,13 @@ _TEMP_DIR = flags.DEFINE_string(
 # Batch processing configuration.
 _BATCH_SIZE = flags.DEFINE_integer(
     "batch_size",
-    None,
+    512,
     "Number of fold inputs to process together in a single batch. When set, "
     "all protein sequences from up to batch_size fold inputs are collected "
     "into a single MMseqs2 queryDB for GPU-accelerated batch search. This is "
-    "much more efficient than sequential processing. If not set, processes "
-    "each fold input sequentially (current default behavior).",
-    lower_bound=1,
+    "much more efficient than sequential processing. Set to 0 to disable "
+    "batch mode and process each fold input sequentially.",
+    lower_bound=0,
 )
 
 # Optional queue directory for producer/consumer inference workflows.
@@ -252,6 +252,92 @@ _AFDB_CACHE_DIR = flags.DEFINE_string(
     None,
     "Optional directory for caching downloaded AFDB mmCIF structures. "
     "If not set, structures are downloaded on-demand without caching.",
+)
+
+# Nhmmer configuration (for RNA MSA search via HMMER).
+_NHMMER_BINARY_PATH = flags.DEFINE_string(
+    "nhmmer_binary_path",
+    None,
+    "Path to the nhmmer binary (from HMMER suite). Required for RNA "
+    "MSA search. Install: conda install -c bioconda hmmer",
+)
+_HMMALIGN_BINARY_PATH = flags.DEFINE_string(
+    "hmmalign_binary_path",
+    None,
+    "Path to the hmmalign binary (from HMMER suite). Required for RNA "
+    "MSA search.",
+)
+_HMMBUILD_BINARY_PATH = flags.DEFINE_string(
+    "hmmbuild_binary_path",
+    None,
+    "Path to the hmmbuild binary (from HMMER suite). Required for RNA "
+    "MSA search.",
+)
+_RNACENTRAL_DATABASE_PATH = flags.DEFINE_string(
+    "rnacentral_database_path",
+    "${DB_DIR}/rnacentral_active_seq_id_90_cov_80_linclust.fasta",
+    "Path to the RNAcentral database FASTA for RNA MSA search.",
+)
+_RFAM_DATABASE_PATH = flags.DEFINE_string(
+    "rfam_database_path",
+    "${DB_DIR}/rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
+    "Path to the Rfam database FASTA for RNA MSA search.",
+)
+_NT_DATABASE_PATH = flags.DEFINE_string(
+    "nt_database_path",
+    "${DB_DIR}/nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
+    "Path to the NT database FASTA for RNA MSA search.",
+)
+_RNACENTRAL_Z_VALUE = flags.DEFINE_float(
+    "rnacentral_z_value",
+    None,
+    "Z-value (megabases) for RNAcentral database. Required for sharded databases.",
+)
+_RFAM_Z_VALUE = flags.DEFINE_float(
+    "rfam_z_value",
+    None,
+    "Z-value (megabases) for Rfam database. Required for sharded databases.",
+)
+_NT_Z_VALUE = flags.DEFINE_float(
+    "nt_z_value",
+    None,
+    "Z-value (megabases) for NT database. Required for sharded databases.",
+)
+_NHMMER_N_CPU = flags.DEFINE_integer(
+    "nhmmer_n_cpu",
+    8,
+    "Number of CPUs per nhmmer search.",
+    lower_bound=1,
+)
+_NHMMER_MAX_SEQUENCES = flags.DEFINE_integer(
+    "nhmmer_max_sequences",
+    10_000,
+    "Maximum number of sequences to return from nhmmer search.",
+    lower_bound=1,
+)
+_NHMMER_MAX_PARALLEL_SHARDS = flags.DEFINE_integer(
+    "nhmmer_max_parallel_shards",
+    None,
+    "Maximum number of database shards to search in parallel with nhmmer. "
+    "Only applicable if using sharded databases.",
+    lower_bound=1,
+)
+
+# MMseqs2 nucleotide search (alternative to nhmmer).
+_RNA_MMSEQS_DB_DIR = flags.DEFINE_string(
+    "rna_mmseqs_db_dir",
+    None,
+    "Directory containing MMseqs2 databases for RNA/DNA nucleotide search. "
+    "When set, uses MMseqs2 --search-type 3 (CPU-only) instead of nhmmer. "
+    "Databases must be pre-built with 'mmseqs createdb' from RNA FASTA files. "
+    "Expected databases: rfam, rnacentral, nt_rna (named by prefix). "
+    "If not set, auto-detected from <db_dir>/mmseqs_rna/.",
+)
+_USE_NHMMER = flags.DEFINE_bool(
+    "use_nhmmer",
+    False,
+    "Force nhmmer for RNA MSA search instead of MMseqs2 nucleotide search. "
+    "By default, MMseqs2 is used if mmseqs_rna/ databases are found.",
 )
 
 # Data pipeline configuration.
@@ -427,7 +513,57 @@ def main(_):
     def expand_path(x):
         return replace_db_dir(x, DB_DIR.value)
 
+    def try_expand_path(x):
+        """Expand path, returning None if the database doesn't exist."""
+        try:
+            return replace_db_dir(x, DB_DIR.value)
+        except FileNotFoundError:
+            return None
+
     max_template_date = datetime.date.fromisoformat(_MAX_TEMPLATE_DATE.value)
+
+    # Auto-detect RNA MMseqs2 databases if not explicitly set.
+    # Check each db_dir for mmseqs_rna/rfam.dbtype.
+    rna_mmseqs_db_dir = _RNA_MMSEQS_DB_DIR.value
+    if rna_mmseqs_db_dir is None and not _USE_NHMMER.value:
+        for db_dir in DB_DIR.value:
+            candidate = os.path.join(db_dir, "mmseqs_rna")
+            if os.path.isfile(os.path.join(candidate, "rfam.dbtype")):
+                rna_mmseqs_db_dir = candidate
+                print(f"Auto-detected RNA MMseqs2 databases at {candidate}")
+                break
+
+    # Resolve nhmmer database paths only if --use_nhmmer is set or no
+    # MMseqs2 RNA databases are available (fallback).
+    use_nhmmer = _USE_NHMMER.value or rna_mmseqs_db_dir is None
+    if use_nhmmer and _NHMMER_BINARY_PATH.value:
+        nhmmer_rnacentral = try_expand_path(_RNACENTRAL_DATABASE_PATH.value)
+        nhmmer_rfam = try_expand_path(_RFAM_DATABASE_PATH.value)
+        nhmmer_nt = try_expand_path(_NT_DATABASE_PATH.value)
+        if _USE_NHMMER.value:
+            print("Using nhmmer for RNA MSA search (--use_nhmmer flag)")
+        else:
+            print("Falling back to nhmmer for RNA MSA search (no mmseqs_rna/ found)")
+    elif use_nhmmer:
+        # No mmseqs_rna found and nhmmer not configured — RNA chains will
+        # get query-only MSA (no search performed).
+        nhmmer_rnacentral = None
+        nhmmer_rfam = None
+        nhmmer_nt = None
+        if _USE_NHMMER.value:
+            print("WARNING: --use_nhmmer set but --nhmmer_binary_path not provided. "
+                  "RNA chains will get empty MSA.")
+        else:
+            print("WARNING: No RNA search configured (no mmseqs_rna/ found, "
+                  "nhmmer not configured). RNA chains will get empty MSA.")
+    else:
+        nhmmer_rnacentral = None
+        nhmmer_rfam = None
+        nhmmer_nt = None
+
+    # If --use_nhmmer is forced, don't use MMseqs2 RNA databases
+    if _USE_NHMMER.value:
+        rna_mmseqs_db_dir = None
 
     data_pipeline_config = pipeline.DataPipelineConfig(
         pdb_database_path=expand_path(_PDB_DATABASE_PATH.value),
@@ -458,6 +594,20 @@ def main(_):
         esmfold_device=_ESMFOLD_DEVICE.value,
         esmfold_chunk_size=_ESMFOLD_CHUNK_SIZE.value,
         afdb_cache_dir=_AFDB_CACHE_DIR.value,
+        # Nhmmer configuration (for RNA MSA search)
+        nhmmer_binary_path=_NHMMER_BINARY_PATH.value if use_nhmmer else None,
+        hmmalign_binary_path=_HMMALIGN_BINARY_PATH.value if use_nhmmer else None,
+        hmmbuild_binary_path=_HMMBUILD_BINARY_PATH.value if use_nhmmer else None,
+        rnacentral_database_path=nhmmer_rnacentral,
+        rfam_database_path=nhmmer_rfam,
+        nt_database_path=nhmmer_nt,
+        nhmmer_n_cpu=_NHMMER_N_CPU.value,
+        nhmmer_max_sequences=_NHMMER_MAX_SEQUENCES.value,
+        rnacentral_z_value=_RNACENTRAL_Z_VALUE.value,
+        rfam_z_value=_RFAM_Z_VALUE.value,
+        nt_z_value=_NT_Z_VALUE.value,
+        nhmmer_max_parallel_shards=_NHMMER_MAX_PARALLEL_SHARDS.value,
+        rna_mmseqs_db_dir=rna_mmseqs_db_dir,
     )
 
     # Process fold inputs - either in batch mode or sequentially
@@ -465,13 +615,10 @@ def main(_):
     data_pipeline = pipeline.DataPipeline(data_pipeline_config)
 
     pipeline_start_time = time.time()
-    mode = (
-        "batch"
-        if (_BATCH_SIZE.value is not None and len(fold_inputs) > 1)
-        else "sequential"
-    )
+    use_batch = _BATCH_SIZE.value and _BATCH_SIZE.value > 0 and len(fold_inputs) > 1
+    mode = "batch" if use_batch else "sequential"
 
-    if _BATCH_SIZE.value is not None and len(fold_inputs) > 1:
+    if use_batch:
         # Batch mode: process multiple fold inputs together
         batch_size = _BATCH_SIZE.value
         print(f"\n{'=' * 60}")
@@ -507,8 +654,8 @@ def main(_):
                     )
                 print(f"Fold job {fold_input.name} done.\n")
     else:
-        # Sequential mode: process each fold input individually (default)
-        if _BATCH_SIZE.value is None:
+        # Sequential mode: process each fold input individually
+        if not use_batch:
             print("\nSequential mode: processing fold inputs one at a time")
             print("(Use --batch_size=N to enable batch processing)\n")
 

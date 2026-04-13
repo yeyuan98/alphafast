@@ -14,6 +14,7 @@ WEIGHTS_VOLUME_NAME = "af3-weights"
 DATABASE_MOUNT_PATH = "/databases"
 WEIGHTS_MOUNT_PATH = "/weights"
 MMSEQS_DB_PATH = "/databases/mmseqs"
+RNA_MMSEQS_DB_PATH = "/databases/mmseqs_rna"
 
 # GPU options mapping CLI flag to Modal GPU spec
 GPU_OPTIONS = {

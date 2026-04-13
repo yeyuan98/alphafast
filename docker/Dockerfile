@@ -58,7 +58,19 @@ ENV UV_COMPILE_BYTECODE=0
 # Read local venv
 ENV UV_PROJECT_ENVIRONMENT=/alphafold3_venv
 RUN uv venv $UV_PROJECT_ENVIRONMENT
-ENV PATH="/alphafold3_venv/bin:$PATH"
+ENV PATH="/hmmer/bin:/alphafold3_venv/bin:$PATH"
+
+# Install HMMER from source (matching upstream AF3).
+# nhmmer (RNA MSA search fallback) is included in the HMMER suite.
+RUN mkdir -p /hmmer_build /hmmer && \
+    wget -q http://eddylab.org/software/hmmer/hmmer-3.4.tar.gz -P /hmmer_build && \
+    (cd /hmmer_build && echo "ca70d94fd0cf271bd7063423aabb116d42de533117343a9b27a65c17ff06fbf3 hmmer-3.4.tar.gz" | sha256sum --check) && \
+    (cd /hmmer_build && tar zxf hmmer-3.4.tar.gz && rm hmmer-3.4.tar.gz) && \
+    (cd /hmmer_build/hmmer-3.4 && ./configure --prefix /hmmer) && \
+    (cd /hmmer_build/hmmer-3.4 && make -j$(nproc)) && \
+    (cd /hmmer_build/hmmer-3.4 && make install) && \
+    (cd /hmmer_build/hmmer-3.4/easel && make install) && \
+    rm -rf /hmmer_build
 
 # Install MMSeqs2-GPU and Foldseek
 RUN wget -q -O mmseqs.tar.gz https://mmseqs.com/latest/mmseqs-linux-gpu.tar.gz & \

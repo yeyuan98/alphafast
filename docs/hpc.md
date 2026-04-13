@@ -42,7 +42,7 @@ HPC filesystems vary in performance characteristics. The data pipeline writes ma
 
 ### Bind Mounts
 
-Singularity requires explicit bind mounts for directories outside the container. The `run_alphafast.sh` script handles this automatically for `--db_dir`, `--weights_dir`, `--input_dir`, and `--output_dir`. If you need to pass additional paths (e.g., `--temp_dir`), you may need to add bind mounts manually or ensure the paths are under an already-bound parent directory.
+Singularity requires explicit bind mounts for directories outside the container. The `run_alphafast.sh` script handles this automatically for `--db_dir`, `--weights_dir`, `--input_dir`, `--output_dir`, `--temp_dir`, and `--jax_compilation_cache_dir`. If you need to pass additional paths, you may need to add bind mounts manually or ensure the paths are under an already-bound parent directory.
 
 ## CUDA Driver Compatibility
 
@@ -82,12 +82,15 @@ CONTAINER=/path/to/alphafast.sif
 
 # Use local scratch for temporary files (recommended)
 export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
+mkdir -p /scratch/$USER/alphafast_tmp /scratch/$USER/alphafast_jax_cache
 
 ./scripts/run_alphafast.sh \
     --input_dir $INPUT_DIR \
     --output_dir $OUTPUT_DIR \
     --db_dir $DB_DIR \
     --weights_dir $WEIGHTS_DIR \
+    --temp_dir /scratch/$USER/alphafast_tmp \
+    --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
     --container $CONTAINER
 ```
 
@@ -115,6 +118,7 @@ CONTAINER=/path/to/alphafast.sif
 
 # Use local scratch for temporary files (recommended)
 export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
+mkdir -p /scratch/$USER/alphafast_tmp /scratch/$USER/alphafast_jax_cache
 
 ./scripts/run_alphafast.sh \
     --input_dir $INPUT_DIR \
@@ -122,7 +126,9 @@ export SINGULARITY_CACHEDIR=/scratch/$USER/.singularity
     --db_dir $DB_DIR \
     --weights_dir $WEIGHTS_DIR \
     --container $CONTAINER \
-    --num_gpus 4
+    --temp_dir /scratch/$USER/alphafast_tmp \
+    --jax_compilation_cache_dir /scratch/$USER/alphafast_jax_cache \
+    --gpu_devices 0,1,2,3
 ```
 
 With 4 GPUs, all 4 GPUs run MSA search simultaneously in Phase 1. After all MSA jobs complete, the results are re-distributed and all 4 GPUs run inference simultaneously in Phase 2.
@@ -145,5 +151,7 @@ Memory requirements depend on protein size. For sequences longer than 2000 resid
 **Slow MSA searches**: Set `--temp_dir` to local scratch storage. Network filesystems add significant overhead for the many small I/O operations in MMseqs2.
 
 **Out of memory during inference**: Reduce `XLA_CLIENT_MEM_FRACTION` (default 0.95) or use `--flash_attention_implementation xla` for lower memory usage on older GPUs.
+
+**First inference batch is much slower**: Use `--jax_compilation_cache_dir` on fast storage so later runs can reuse compiled JAX executables. A fully cold multi-GPU launch can still spend extra time compiling on the first worker batch before the cache is populated.
 
 **Singularity permission errors**: Ensure `SINGULARITY_CACHEDIR` is writable and on a filesystem that supports file locking.

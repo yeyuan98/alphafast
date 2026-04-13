@@ -283,7 +283,7 @@ class Msa:
 
 
 def get_msa_tool(
-    msa_tool_config: msa_config.MmseqsConfig,
+    msa_tool_config: msa_config.MmseqsConfig | msa_config.NhmmerConfig,
 ) -> msa_tool.MsaTool:
     """Returns the requested MSA tool."""
 
@@ -300,6 +300,23 @@ def get_msa_tool(
                 gpu_enabled=msa_tool_config.gpu_enabled,
                 gpu_device=msa_tool_config.gpu_device,
                 threads=msa_tool_config.threads,
+                temp_dir=msa_tool_config.temp_dir,
+                search_type=msa_tool_config.search_type,
+            )
+        case msa_config.NhmmerConfig():
+            from alphafold3.data.tools import nhmmer
+
+            return nhmmer.Nhmmer(
+                binary_path=msa_tool_config.binary_path,
+                hmmalign_binary_path=msa_tool_config.hmmalign_binary_path,
+                hmmbuild_binary_path=msa_tool_config.hmmbuild_binary_path,
+                database_path=msa_tool_config.database_config.path,
+                n_cpu=msa_tool_config.n_cpu,
+                e_value=msa_tool_config.e_value,
+                z_value=msa_tool_config.z_value,
+                max_sequences=msa_tool_config.max_sequences,
+                alphabet=msa_tool_config.alphabet,
+                max_threads=msa_tool_config.max_parallel_shards,
             )
         case _:
             raise ValueError(f"Unknown MSA tool: {msa_tool_config}.")
@@ -377,6 +394,8 @@ def get_msa_pipelined(
         gpu_enabled=run_config.config.gpu_enabled,
         gpu_device=run_config.config.gpu_device,
         threads=run_config.config.threads,
+        temp_dir=run_config.config.temp_dir,
+        search_type=run_config.config.search_type,
     )
 
     # Get the future from pipelined query (GPU search runs now, post-processing async)
@@ -445,6 +464,8 @@ def get_msa_shared_db_pipelined(
             gpu_enabled=run_config.config.gpu_enabled,
             gpu_device=run_config.config.gpu_device,
             threads=run_config.config.threads,
+            temp_dir=run_config.config.temp_dir,
+            search_type=run_config.config.search_type,
         )
 
         # Search using shared query DB (GPU search runs now, post-processing async)

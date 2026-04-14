@@ -54,6 +54,8 @@ export DB_DIR="${DB_DIR:-/data/public_databases}"
 export MMSEQS_DB_DIR="${MMSEQS_DB_DIR:-/data/mmseqs_databases}"
 export MODEL_DIR="${MODEL_DIR:-/data/models}"
 export TEMP_DIR="${TEMP_DIR:-}"
+export HEAD_TO_TAIL="${HEAD_TO_TAIL:-}"
+export DISULFIDE_CHAIN_RES="${DISULFIDE_CHAIN_RES:-}"
 
 # RNA search configuration: auto-detect mmseqs_rna/ unless USE_NHMMER is set.
 export USE_NHMMER="${USE_NHMMER:-}"
@@ -304,6 +306,8 @@ for ((i=0; i<NUM_GPUS; i++)); do
     --gpu_device=0 \
     --force_output_dir \
     --write_timing_json \
+    ${HEAD_TO_TAIL:+--head_to_tail} \
+    ${DISULFIDE_CHAIN_RES:+--disulfide_chain_res="$DISULFIDE_CHAIN_RES"} \
     ${JAX_CACHE_DIR:+--jax_compilation_cache_dir="$JAX_CACHE_DIR"} \
     > "$FOLD_LOG" 2>&1 &
   FOLD_PIDS+=("$!")

@@ -334,6 +334,8 @@ def predict_structure(
     run_msa: bool = True,
     num_seeds: int = 1,
     batch_size: int = 32,
+    head_to_tail: bool = False,
+    disulfide_chain_res: str = "",
 ) -> dict | list[dict]:
     """
     Run AlphaFold3 prediction on one or more inputs.
@@ -445,6 +447,10 @@ def predict_structure(
                 f"--db_dir={DATABASE_MOUNT_PATH}",
                 "--norun_data_pipeline",
             ]
+            if head_to_tail:
+                cmd.append("--head_to_tail")
+            if disulfide_chain_res:
+                cmd.append(f"--disulfide_chain_res={disulfide_chain_res}")
         else:
             if run_msa:
                 data_json_files = list(output_dir.rglob("*_data.json"))
@@ -458,6 +464,10 @@ def predict_structure(
                 f"--output_dir={inference_output_dir}",
                 f"--db_dir={DATABASE_MOUNT_PATH}",
                 "--norun_data_pipeline",
+            if head_to_tail:
+                cmd.append("--head_to_tail")
+            if disulfide_chain_res:
+                cmd.append(f"--disulfide_chain_res={disulfide_chain_res}")
             ]
         print(f"Command: {' '.join(cmd)}")
 
@@ -800,7 +810,9 @@ class InferenceWorker:
         return "warm"
 
     @modal.method()
-    def process_chunk(self, job_id: str, protein_names: list[str]) -> list[dict]:
+    def process_chunk(self, job_id: str, protein_names: list[str],
+                      head_to_tail: bool = False,
+                      disulfide_chain_res: str = "") -> list[dict]:
         """Process a chunk of proteins via --input_dir.
 
         Creates a flat temp dir with symlinks to data JSONs, then runs
@@ -857,6 +869,10 @@ class InferenceWorker:
                 f"--output_dir={inference_output}",
                 f"--db_dir={DATABASE_MOUNT_PATH}",
                 "--norun_data_pipeline",
+            if head_to_tail:
+                cmd.append("--head_to_tail")
+            if disulfide_chain_res:
+                cmd.append(f"--disulfide_chain_res={disulfide_chain_res}")
             ]
             print(f"Command: {' '.join(cmd)}")
 
@@ -1196,6 +1212,8 @@ def _run_multi_gpu_pipeline(
     num_gpus: int,
     batch_size: int,
     skip_msa: bool,
+    head_to_tail: bool = False,
+    disulfide_chain_res: str = "",
 ):
     """Run batch prediction split across multiple GPUs.
 
@@ -1227,7 +1245,8 @@ def _run_multi_gpu_pipeline(
     futures = []
     for chunk in non_empty_chunks:
         future = predict_structure.spawn(
-            chunk, run_msa=run_msa_locally, batch_size=batch_size
+            chunk, run_msa=run_msa_locally, batch_size=batch_size,
+            head_to_tail=head_to_tail, disulfide_chain_res=disulfide_chain_res,
         )
         futures.append((chunk, future))
 
@@ -1272,6 +1291,8 @@ def _run_producer_consumer_pipeline(
     num_consumers: int,
     skip_msa: bool,
     keep_workspace: bool,
+    head_to_tail: bool = False,
+    disulfide_chain_res: str = "",
 ):
     """Run the warm producer-consumer pipeline."""
     from utils.batch_utils import (
@@ -1364,7 +1385,11 @@ def _run_producer_consumer_pipeline(
             consumer_chunks = split_into_chunks(batch_data, num_consumers)
             for chunk in consumer_chunks:
                 if chunk:
-                    future = worker.process_chunk.spawn(job_id, chunk)
+                    future = worker.process_chunk.spawn(
+                        job_id, chunk,
+                        head_to_tail=head_to_tail,
+                        disulfide_chain_res=disulfide_chain_res,
+                    )
                     chunk_futures.append((chunk, future))
 
             print(f"  Dispatched {len(batch_data)} proteins to consumers")
@@ -1393,7 +1418,11 @@ def _run_producer_consumer_pipeline(
         consumer_chunks = split_into_chunks(data_json_names, num_consumers)
         for chunk in consumer_chunks:
             if chunk:
-                future = worker.process_chunk.spawn(job_id, chunk)
+                future = worker.process_chunk.spawn(
+                    job_id, chunk,
+                    head_to_tail=head_to_tail,
+                    disulfide_chain_res=disulfide_chain_res,
+                )
                 chunk_futures.append((chunk, future))
 
     print()
@@ -1448,6 +1477,8 @@ def main(
     output: str = "./af3_output",
     parallel: int = 4,
     batch_size: int = 32,
+    head_to_tail: bool = False,
+    disulfide_chain_res: str = "",
     skip_msa: bool = False,
     check: bool = False,
     msa_only: bool = False,
@@ -1550,6 +1581,8 @@ def main(
             num_gpus=effective_gpus,
             batch_size=batch_size,
             skip_msa=skip_msa,
+            head_to_tail=head_to_tail,
+            disulfide_chain_res=disulfide_chain_res,
         )
     elif mode == "producer-consumer":
         print(f"Mode: Producer-Consumer (warm pipeline)")
@@ -1561,6 +1594,8 @@ def main(
             num_consumers=num_consumers,
             skip_msa=skip_msa,
             keep_workspace=keep_workspace,
+            head_to_tail=head_to_tail,
+            disulfide_chain_res=disulfide_chain_res,
         )
     else:
         # Single mode (default)
@@ -1579,7 +1614,10 @@ def main(
             if msa_only:
                 result = run_msa_only.remote(inputs[0])
             else:
-                result = predict_structure.remote(inputs[0], run_msa=run_msa_locally, batch_size=batch_size)
+                result = predict_structure.remote(
+                    inputs[0], run_msa=run_msa_locally, batch_size=batch_size,
+                    head_to_tail=head_to_tail, disulfide_chain_res=disulfide_chain_res,
+                )
 
             if result.get("status") == "success":
                 print("Prediction successful!")
@@ -1603,7 +1641,8 @@ def main(
             elif single_gpu:
                 print("Sending all inputs to one GPU for batch processing...")
                 batch_result = predict_structure.remote(
-                    inputs, run_msa=run_msa_locally, batch_size=batch_size
+                    inputs, run_msa=run_msa_locally, batch_size=batch_size,
+                    head_to_tail=head_to_tail, disulfide_chain_res=disulfide_chain_res,
                 )
                 results = batch_result if isinstance(batch_result, list) else [batch_result]
                 for i, r in enumerate(results):
@@ -1613,7 +1652,10 @@ def main(
             else:
                 futures = []
                 for inp in inputs:
-                    future = predict_structure.spawn(inp, run_msa=run_msa_locally, batch_size=batch_size)
+                    future = predict_structure.spawn(
+                        inp, run_msa=run_msa_locally, batch_size=batch_size,
+                        head_to_tail=head_to_tail, disulfide_chain_res=disulfide_chain_res,
+                    )
                     futures.append(future)
 
                 results = []

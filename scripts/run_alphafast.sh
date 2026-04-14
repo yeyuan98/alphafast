@@ -49,6 +49,8 @@ JAX_COMPILATION_CACHE_DIR=""
 JAX_CACHE_CONTAINER_DIR="/data/jax_cache"
 TEMP_DIR=""
 TEMP_DIR_CONTAINER="/data/temp_dir"
+HEAD_TO_TAIL=""
+DISULFIDE_CHAIN_RES=""
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -85,6 +87,9 @@ usage() {
     echo "  --jax_compilation_cache_dir DIR"
     echo "                        Persistent JAX compilation cache directory to reuse"
     echo "                        compiled inference executables across runs."
+    echo "  --head_to_tail        Enable head-to-tail cyclization for cyclic peptides."
+    echo "  --disulfide_chain_res SPEC"
+    echo "                        Disulfide bond positions, format: [[chain_id,res_i,res_j,...]]"
     exit 1
 }
 
@@ -103,6 +108,8 @@ while [ "$#" -gt 0 ]; do
         --rna_mmseqs_db_dir) RNA_MMSEQS_DB_DIR="$2"; shift 2 ;;
         --use_nhmmer)   USE_NHMMER="true"; shift ;;
         --jax_compilation_cache_dir) JAX_COMPILATION_CACHE_DIR="$2"; shift 2 ;;
+        --head_to_tail)  HEAD_TO_TAIL="true"; shift ;;
+        --disulfide_chain_res) DISULFIDE_CHAIN_RES="$2"; shift 2 ;;
         --help|-h)      usage ;;
         *)              echo "Unknown argument: $1"; usage ;;
     esac
@@ -348,6 +355,8 @@ if [ "$NUM_GPUS" -eq 1 ]; then
         --norun_data_pipeline \
         --output_dir=/data/af_output \
         --force_output_dir \
+        ${HEAD_TO_TAIL:+--head_to_tail} \
+        ${DISULFIDE_CHAIN_RES:+--disulfide_chain_res="$DISULFIDE_CHAIN_RES"} \
         ${JAX_COMPILATION_CACHE_DIR:+--jax_compilation_cache_dir=${JAX_CACHE_CONTAINER_DIR}} \
         2>&1 | tee "$INFERENCE_LOG"
 
@@ -379,6 +388,8 @@ else
         "SINGULARITYENV_CUDA_VISIBLE_DEVICES=${GPU_DEVICES}"
         "SINGULARITYENV_RNA_MMSEQS_DB_DIR=${MULTIGPU_RNA_DB_DIR}"
         "SINGULARITYENV_USE_NHMMER=${USE_NHMMER}"
+        "SINGULARITYENV_HEAD_TO_TAIL=${HEAD_TO_TAIL}"
+        "SINGULARITYENV_DISULFIDE_CHAIN_RES=${DISULFIDE_CHAIN_RES}"
     )
     if [ -n "$RNA_MMSEQS_DB_DIR" ]; then
         DOCKER_EXTRA_ARGS+=(
@@ -425,6 +436,8 @@ else
             -e CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
             -e RNA_MMSEQS_DB_DIR="${MULTIGPU_RNA_DB_DIR}" \
             -e USE_NHMMER="${USE_NHMMER}" \
+            -e HEAD_TO_TAIL="${HEAD_TO_TAIL}" \
+            -e DISULFIDE_CHAIN_RES="${DISULFIDE_CHAIN_RES}" \
             -v "${DB_DIR}:/data/public_databases" \
             -v "${MMSEQS_DB_DIR}:/data/mmseqs_databases" \
             -v "${WEIGHTS_DIR}:/data/models" \

@@ -49,8 +49,9 @@ RUN DEBIAN_FRONTEND=noninteractive \
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /uvx /bin/
 
-# Ye addition - set uv mirror
-ENV UV_DEFAULT_INDEX="http://mirrors.aliyun.com/pypi/simple/"
+# Ye addition - set uv mirror (override with --build-arg UV_INDEX=... for CI)
+ARG UV_INDEX="http://mirrors.aliyun.com/pypi/simple/"
+ENV UV_DEFAULT_INDEX=$UV_INDEX
 
 # Disable uv bytecode compilation as this hits ulimit on some systems
 ENV UV_COMPILE_BYTECODE=0
@@ -102,8 +103,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --all-groups --no-editable
 
 # Build chemical components database (this binary was installed by uv sync)
+RUN DEBIAN_FRONTEND=noninteractive apt-get update --quiet && apt-get install --yes --quiet util-linux && rm -rf /var/lib/apt/lists/*
 RUN date && hwclock -s || true
-RUN uv run build_data
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv run --no-sync build_data
 
 # To work around a known XLA issue causing the compilation time to greatly
 # increase, the following environment variable setting XLA flags must be enabled

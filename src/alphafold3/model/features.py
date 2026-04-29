@@ -31,6 +31,7 @@ from alphafold3.model import data_constants
 from alphafold3.model import merging_features
 from alphafold3.model import msa_pairing
 from alphafold3.model import cyclic_peptide_matrix
+from alphafold3.structure import chemical_components as struc_chem_comps
 from alphafold3.model.atom_layout import atom_layout
 import jax
 import jax.numpy as jnp
